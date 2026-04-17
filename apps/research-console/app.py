@@ -58,6 +58,7 @@ MODEL_PRESETS = [
     "gpt-4o-mini",
     "o4-mini",
 ]
+LEGACY_AMINER_REC5_URL = "https://api.aminer.cn/api/v2/open/ai/rec5"
 PERSIST_CONFIG_KEYS = [
     "topics",
     "top_k",
@@ -214,6 +215,9 @@ def _init_config_state() -> None:
     merged = _default_config_values()
     persisted = _load_persisted_config()
     merged.update({k: v for k, v in persisted.items() if v is not None})
+    status_messages: list[str] = []
+    notices: list[str] = []
+
     merged["integration_mode"] = _normalize_integration_mode(merged.get("integration_mode", "builtin"))
     if merged["integration_mode"] == "external":
         ok, reason = inspect_external_dependencies(
@@ -222,8 +226,20 @@ def _init_config_state() -> None:
         )
         if not ok:
             merged["integration_mode"] = "builtin"
-            merged["persist_save_status"] = f"检测到 external 依赖不可用，已自动迁移到 builtin：{reason}"
-            merged["integration_notice"] = f"已从 external 自动回退到 builtin（原因：{reason}）"
+            status_messages.append(f"检测到 external 依赖不可用，已自动迁移到 builtin：{reason}")
+            notices.append(f"已从 external 自动回退到 builtin（原因：{reason}）")
+
+    rec5_url = str(merged.get("aminer_rec5_url") or "").strip()
+    if rec5_url == LEGACY_AMINER_REC5_URL:
+        merged["aminer_rec5_url"] = DEFAULT_REC5_URL
+        migration_msg = f"已将 AMiner 推荐地址从旧版 v2 自动迁移到新版 endpoint：{DEFAULT_REC5_URL}"
+        status_messages.append(migration_msg)
+        notices.append(migration_msg)
+
+    if status_messages:
+        merged["persist_save_status"] = "；".join(status_messages)
+    if notices:
+        merged["integration_notice"] = "；".join(notices)
     _apply_config_to_session(merged)
     st.session_state.config_initialized = True
     if "persist_save_status" not in st.session_state:

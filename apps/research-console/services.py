@@ -14,7 +14,7 @@ from urllib import parse, request
 import xml.etree.ElementTree as ET
 
 
-DEFAULT_REC5_URL = "https://api.aminer.cn/api/v2/open/ai/rec5"
+DEFAULT_REC5_URL = "https://datacenter.aminer.cn/gateway/open_platform/api/v3/paper/rec5"
 CANONICAL_PROMPT_MARKER = "## Canonical Prompt（单段主 Prompt）"
 BUILTIN_CANONICAL_PROMPT = (
     "你是一名严谨的论文审稿人与复现工程师，请仅基于我提供的论文全文/文本（优先 PDF 全文提取）进行深度研读并生成可落盘报告；"
@@ -451,7 +451,7 @@ class RecommenderService:
             with request.urlopen(req, timeout=45) as resp:  # nosec B310
                 payload = json.loads(resp.read().decode("utf-8"))
         except urlerror.HTTPError as exc:
-            raise RuntimeError(f"builtin 推荐失败：AMiner API HTTP {exc.code}") from exc
+            raise RuntimeError(f"builtin 推荐失败：AMiner API HTTP {exc.code} @ {rec5_url}") from exc
         except Exception as exc:
             raise RuntimeError(f"builtin 推荐失败：AMiner API 请求异常 {exc.__class__.__name__}") from exc
 
