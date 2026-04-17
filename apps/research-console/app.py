@@ -9,6 +9,8 @@ from typing import Any
 import streamlit as st
 
 from services import (
+    DEFAULT_REC5_URL,
+    ExternalDependencyUnavailable,
     PaperCandidate,
     ReadingService,
     RecommenderService,
@@ -23,6 +25,7 @@ from services import (
     read_env_var,
     resolve_pdf_url,
     select_top_k,
+    inspect_external_dependencies,
     today_output_dir,
     write_today_recommendations,
 )
@@ -60,14 +63,23 @@ PERSIST_CONFIG_KEYS = [
     "top_k",
     "year_range",
     "focus_questions",
+    "integration_mode",
     "aminer_skill_dir",
     "paper_skill_dir",
+    "aminer_rec5_url",
     "output_dir",
     "aminer_api_key",
     "llm_base_url",
     "llm_api_key",
     "llm_model",
 ]
+
+
+def _normalize_integration_mode(value: Any) -> str:
+    mode = str(value or "").strip().lower()
+    if mode not in {"builtin", "external"}:
+        return "builtin"
+    return mode
 
 
 st.markdown(
@@ -126,8 +138,10 @@ def _default_config_values() -> dict[str, Any]:
         "top_k": 3,
         "year_range": (2025, 2026),
         "focus_questions": "",
+        "integration_mode": _normalize_integration_mode(_env("PDR_INTEGRATION_MODE", "builtin")),
         "aminer_skill_dir": str(default_aminer_skill_dir()),
         "paper_skill_dir": str(default_paper_skill_dir()),
+        "aminer_rec5_url": _env("AMINER_REC5_URL", DEFAULT_REC5_URL),
         "output_dir": str(today_output_dir()),
         "aminer_api_key": _env("AMINER_API_KEY"),
         "llm_base_url": _env("PDR_LLM_BASE_URL", "https://api.openai.com/v1"),
@@ -183,8 +197,10 @@ def _apply_config_to_session(config: dict[str, Any]) -> None:
         st.session_state.year_range = (2025, 2026)
 
     st.session_state.focus_questions = str(config.get("focus_questions", ""))
+    st.session_state.integration_mode = _normalize_integration_mode(config.get("integration_mode", "builtin"))
     st.session_state.aminer_skill_dir = str(config.get("aminer_skill_dir", str(default_aminer_skill_dir())))
     st.session_state.paper_skill_dir = str(config.get("paper_skill_dir", str(default_paper_skill_dir())))
+    st.session_state.aminer_rec5_url = str(config.get("aminer_rec5_url", DEFAULT_REC5_URL))
     st.session_state.output_dir = str(config.get("output_dir", str(today_output_dir())))
     st.session_state.aminer_api_key = str(config.get("aminer_api_key", ""))
     st.session_state.llm_base_url = str(config.get("llm_base_url", "https://api.openai.com/v1"))
@@ -198,10 +214,44 @@ def _init_config_state() -> None:
     merged = _default_config_values()
     persisted = _load_persisted_config()
     merged.update({k: v for k, v in persisted.items() if v is not None})
+    merged["integration_mode"] = _normalize_integration_mode(merged.get("integration_mode", "builtin"))
+    if merged["integration_mode"] == "external":
+        ok, reason = inspect_external_dependencies(
+            Path(str(merged.get("aminer_skill_dir") or default_aminer_skill_dir())),
+            Path(str(merged.get("paper_skill_dir") or default_paper_skill_dir())),
+        )
+        if not ok:
+            merged["integration_mode"] = "builtin"
+            merged["persist_save_status"] = f"检测到 external 依赖不可用，已自动迁移到 builtin：{reason}"
+            merged["integration_notice"] = f"已从 external 自动回退到 builtin（原因：{reason}）"
     _apply_config_to_session(merged)
     st.session_state.config_initialized = True
     if "persist_save_status" not in st.session_state:
         st.session_state.persist_save_status = ""
+    if merged.get("persist_save_status"):
+        st.session_state.persist_save_status = str(merged["persist_save_status"])
+        _save_persisted_config(_config_snapshot())
+    if "integration_notice" not in st.session_state:
+        st.session_state.integration_notice = ""
+    if merged.get("integration_notice"):
+        st.session_state.integration_notice = str(merged["integration_notice"])
+
+
+def _set_integration_notice(message: str) -> None:
+    st.session_state.integration_notice = message
+    if message:
+        _stage_log(st.session_state.current_stage, message)
+
+
+def _fallback_to_builtin(config: dict[str, Any], *, reason: str) -> None:
+    notice = f"已从 external 自动回退到 builtin（原因：{reason}）"
+    st.session_state.integration_mode = "builtin"
+    os.environ["PDR_INTEGRATION_MODE"] = "builtin"
+    config["integration_mode"] = "builtin"
+    ok, msg = _save_persisted_config(_config_snapshot())
+    if ok:
+        st.session_state.persist_save_status = msg
+    _set_integration_notice(notice)
 
 
 def _truncate_middle(text: str, limit: int = 66) -> str:
@@ -344,8 +394,23 @@ def _recommend(config: dict[str, Any]) -> bool:
         topics = parse_topics(config["topics"])
         if not topics:
             raise RuntimeError("请至少填写一个主题")
-        service = RecommenderService(Path(config["aminer_skill_dir"]))
-        raw = service.recommend(topics)
+        def _run(mode: str) -> list[PaperCandidate]:
+            service = RecommenderService(
+                Path(config["aminer_skill_dir"]),
+                mode=mode,
+                aminer_api_key=config.get("aminer_api_key", ""),
+                aminer_rec5_url=config.get("aminer_rec5_url", ""),
+            )
+            return service.recommend(topics)
+
+        mode = _normalize_integration_mode(config.get("integration_mode", "builtin"))
+        try:
+            raw = _run(mode)
+        except ExternalDependencyUnavailable as exc:
+            if mode != "external":
+                raise
+            _fallback_to_builtin(config, reason=str(exc))
+            raw = _run("builtin")
         filtered = filter_candidates(raw, config["year_range"][0], config["year_range"][1])
         st.session_state.candidates = [x.to_dict() for x in raw]
         st.session_state.filtered_candidates = [x.to_dict() for x in filtered]
@@ -449,22 +514,34 @@ def _read_one(uid: str, config: dict[str, Any]) -> tuple[bool, str]:
     if not base_url or not api_key or not model:
         return False, "LLM 配置不完整"
     pdf_path = Path(pdf_raw)
-    service = ReadingService(Path(config["paper_skill_dir"]))
-    full_text = service.extract_text(pdf_path)
-    fulltext_path = pdf_path.with_name(f"{pdf_path.stem}_fulltext.txt")
-    fulltext_path.write_text(full_text, encoding="utf-8")
-    _append_artifact(fulltext_path, "fulltext", uid)
-    md_path = service.generate_report_md(
-        paper_pdf=pdf_path,
-        full_text=full_text,
-        llm_base_url=base_url,
-        llm_api_key=api_key,
-        llm_model=model,
-        focus_questions=config["focus_questions"],
-    )
-    _append_artifact(md_path, "report_md", uid)
-    html_path = service.render_html(pdf_path)
-    _append_artifact(html_path, "report_html", uid)
+    def _run(mode: str) -> Path:
+        service = ReadingService(Path(config["paper_skill_dir"]), mode=mode)
+        full_text = service.extract_text(pdf_path)
+        fulltext_path = pdf_path.with_name(f"{pdf_path.stem}_fulltext.txt")
+        fulltext_path.write_text(full_text, encoding="utf-8")
+        _append_artifact(fulltext_path, "fulltext", uid)
+        md_path = service.generate_report_md(
+            paper_pdf=pdf_path,
+            full_text=full_text,
+            llm_base_url=base_url,
+            llm_api_key=api_key,
+            llm_model=model,
+            focus_questions=config["focus_questions"],
+        )
+        _append_artifact(md_path, "report_md", uid)
+        html_path = service.render_html(pdf_path)
+        _append_artifact(html_path, "report_html", uid)
+        return md_path
+
+    mode = _normalize_integration_mode(config.get("integration_mode", "builtin"))
+    try:
+        md_path = _run(mode)
+    except ExternalDependencyUnavailable as exc:
+        if mode != "external":
+            raise
+        _fallback_to_builtin(config, reason=str(exc))
+        md_path = _run("builtin")
+
     st.session_state.active_paper_uid = uid
     return True, str(md_path)
 
@@ -497,8 +574,20 @@ def _validate_one(uid: str, config: dict[str, Any]) -> tuple[bool, str]:
     if not pdf_raw:
         return False, "缺少 PDF 路径"
     pdf_path = Path(pdf_raw)
-    service = ReadingService(Path(config["paper_skill_dir"]))
-    validation_path = service.validate(pdf_path)
+    mode = _normalize_integration_mode(config.get("integration_mode", "builtin"))
+
+    def _run(run_mode: str) -> Path:
+        service = ReadingService(Path(config["paper_skill_dir"]), mode=run_mode)
+        return service.validate(pdf_path)
+
+    try:
+        validation_path = _run(mode)
+    except ExternalDependencyUnavailable as exc:
+        if mode != "external":
+            raise
+        _fallback_to_builtin(config, reason=str(exc))
+        validation_path = _run("builtin")
+
     _append_artifact(validation_path, "validation", uid)
     payload = json.loads(validation_path.read_text(encoding="utf-8"))
     if not payload.get("summary", {}).get("passed", False):
@@ -626,8 +715,37 @@ def _run_auto(config: dict[str, Any]) -> None:
 
 @st.dialog("高级设置", width="large")
 def _render_advanced_settings_dialog() -> None:
-    st.session_state.aminer_skill_dir = st.text_input("AMiner skill 目录", value=st.session_state.aminer_skill_dir)
-    st.session_state.paper_skill_dir = st.text_input("paper-deep-reading skill 目录", value=st.session_state.paper_skill_dir)
+    mode_options = ["builtin", "external"]
+    mode_labels = {
+        "builtin": "builtin（内置实现，推荐）",
+        "external": "external（外部 skill 兼容）",
+    }
+    current_mode = _normalize_integration_mode(st.session_state.integration_mode)
+    mode_index = mode_options.index(current_mode) if current_mode in mode_options else 0
+    st.session_state.integration_mode = st.selectbox(
+        "实现模式",
+        options=mode_options,
+        index=mode_index,
+        format_func=lambda m: mode_labels[m],
+    )
+
+    external_mode = st.session_state.integration_mode == "external"
+    if not external_mode:
+        st.caption("当前为 builtin 模式（线上推荐）：下方 skill 路径仅作兼容配置保存，不参与执行。")
+    else:
+        st.caption("当前为 external 模式（仅本地兼容）：若依赖缺失将自动回退 builtin。")
+
+    st.session_state.aminer_skill_dir = st.text_input(
+        "AMiner skill 目录",
+        value=st.session_state.aminer_skill_dir,
+        disabled=not external_mode,
+    )
+    st.session_state.paper_skill_dir = st.text_input(
+        "paper-deep-reading skill 目录",
+        value=st.session_state.paper_skill_dir,
+        disabled=not external_mode,
+    )
+    st.session_state.aminer_rec5_url = st.text_input("AMINER_REC5_URL", value=st.session_state.aminer_rec5_url)
     st.session_state.output_dir = st.text_input("输出目录", value=st.session_state.output_dir)
     st.session_state.llm_base_url = st.text_input("PDR_LLM_BASE_URL", value=st.session_state.llm_base_url)
     st.session_state.aminer_api_key = st.text_input("AMINER_API_KEY", value=st.session_state.aminer_api_key, type="password")
@@ -663,12 +781,17 @@ def _render_advanced_settings_dialog() -> None:
         if st.button("保存配置到环境变量", key="adv_save_env", use_container_width=True):
             pairs = [
                 ("AMINER_API_KEY", st.session_state.aminer_api_key),
+                ("AMINER_REC5_URL", st.session_state.aminer_rec5_url),
                 ("PDR_LLM_BASE_URL", st.session_state.llm_base_url),
                 ("PDR_LLM_API_KEY", st.session_state.llm_api_key),
                 ("PDR_LLM_MODEL", st.session_state.llm_model),
+                ("PDR_INTEGRATION_MODE", st.session_state.integration_mode),
             ]
             rows = []
             for key, value in pairs:
+                if key == "AMINER_REC5_URL" and not str(value or "").strip():
+                    rows.append(f"{key}: SKIP 未设置，使用默认 {DEFAULT_REC5_URL}")
+                    continue
                 ok, msg = persist_env_var(key, value)
                 if value:
                     os.environ[key] = value
@@ -732,6 +855,10 @@ def _render_config_drawer() -> dict[str, Any]:
             unsafe_allow_html=True,
         )
         st.markdown(
+            f"<div class='muted'>实现模式：{st.session_state.integration_mode}</div>",
+            unsafe_allow_html=True,
+        )
+        st.markdown(
             f"<div class='muted'>输出目录：<span class='path' title='{st.session_state.output_dir}'>{_truncate_middle(st.session_state.output_dir, 52)}</span></div>",
             unsafe_allow_html=True,
         )
@@ -750,8 +877,10 @@ def _config_snapshot() -> dict[str, Any]:
         "top_k": int(st.session_state.top_k),
         "year_range": tuple(st.session_state.year_range),
         "focus_questions": st.session_state.focus_questions,
+        "integration_mode": st.session_state.integration_mode,
         "aminer_skill_dir": st.session_state.aminer_skill_dir,
         "paper_skill_dir": st.session_state.paper_skill_dir,
+        "aminer_rec5_url": st.session_state.aminer_rec5_url,
         "output_dir": st.session_state.output_dir,
         "aminer_api_key": st.session_state.aminer_api_key,
         "llm_base_url": st.session_state.llm_base_url,
@@ -766,11 +895,15 @@ def _render_topbar(config: dict[str, Any]) -> None:
         "<span class='chip'>Research Console V2</span>",
         f"<span class='chip'>日期：{date.today()}</span>",
         f"<span class='chip'>当前阶段：{_stage_label(current)}</span>",
+        f"<span class='chip'>模式：{config['integration_mode']}</span>",
         f"<span class='chip'>AMiner Key：{'已配置' if config['aminer_api_key'] else '未配置'}</span>",
         f"<span class='chip'>LLM Key：{'已配置' if config['llm_api_key'] else '未配置'}</span>",
         f"<span class='chip'>模型：{config['llm_model'] or 'N/A'}</span>",
     ]
     st.markdown(f"<div class='rc-top'>{''.join(chips)}</div>", unsafe_allow_html=True)
+    notice = (st.session_state.get("integration_notice") or "").strip()
+    if notice:
+        st.info(notice)
 
 
 def _render_stepper() -> None:
@@ -945,6 +1078,8 @@ def _init_session() -> None:
         st.session_state.artifacts = []
     if "pending_pick_uids" not in st.session_state:
         st.session_state.pending_pick_uids = None
+    if "integration_notice" not in st.session_state:
+        st.session_state.integration_notice = ""
 
 
 def main() -> None:
