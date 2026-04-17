@@ -1,0 +1,4 @@
+interface:
+  display_name: "Paper Deep Reading"
+  short_description: "Structured 7-section paper deep reading with bilingual key-term guidance, lightweight accordion HTML rendering, and deterministic validation"
+  default_prompt: "Use $paper-deep-reading. Require paper_source_path. Draft report with fixed 7 sections and structure-aligned deep section-4 analysis by loading references/report-template.md + references/output-structure-spec.md, then load analysis-taxonomy/writing-style-guide as needed. Keep key-term-first explanations, bilingual term format English（中文）, standalone lines for 术语解释： and 证据锚点：, and evidence-grounded uncertainty marks. Save MD+HTML beside source PDF, render HTML via scripts/render_report_html.ps1, then validate via scripts/validate_report.ps1. Do not claim completion if hard checks fail. Keep accordion lightweight, low-contrast, and non-intrusive; empty accordion panels are forbidden and must fallback to original paragraphs."
