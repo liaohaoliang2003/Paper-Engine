@@ -48,6 +48,26 @@ DEFAULT_TOPICS = (
     "AI for Research, autonomous research agents, literature review automation, "
     "hypothesis generation, experiment planning, tool-use for scientific workflows"
 )
+MODEL_PRESETS = [
+    "gpt-4.1",
+    "gpt-4.1-mini",
+    "gpt-4o",
+    "gpt-4o-mini",
+    "o4-mini",
+]
+PERSIST_CONFIG_KEYS = [
+    "topics",
+    "top_k",
+    "year_range",
+    "focus_questions",
+    "aminer_skill_dir",
+    "paper_skill_dir",
+    "output_dir",
+    "aminer_api_key",
+    "llm_base_url",
+    "llm_api_key",
+    "llm_model",
+]
 
 
 st.markdown(
@@ -94,6 +114,94 @@ html, body, [class*="css"] {
 def _env(name: str, fallback: str = "") -> str:
     value = read_env_var(name)
     return value if value else fallback
+
+
+def _config_file_path() -> Path:
+    return Path.home() / ".paper-engine" / "research-console-config.json"
+
+
+def _default_config_values() -> dict[str, Any]:
+    return {
+        "topics": DEFAULT_TOPICS,
+        "top_k": 3,
+        "year_range": (2025, 2026),
+        "focus_questions": "",
+        "aminer_skill_dir": str(default_aminer_skill_dir()),
+        "paper_skill_dir": str(default_paper_skill_dir()),
+        "output_dir": str(today_output_dir()),
+        "aminer_api_key": _env("AMINER_API_KEY"),
+        "llm_base_url": _env("PDR_LLM_BASE_URL", "https://api.openai.com/v1"),
+        "llm_api_key": _env("PDR_LLM_API_KEY"),
+        "llm_model": _env("PDR_LLM_MODEL", "gpt-4.1"),
+    }
+
+
+def _load_persisted_config() -> dict[str, Any]:
+    path = _config_file_path()
+    if not path.exists():
+        return {}
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+    if not isinstance(payload, dict):
+        return {}
+    config: dict[str, Any] = {}
+    for key in PERSIST_CONFIG_KEYS:
+        if key in payload:
+            config[key] = payload[key]
+    return config
+
+
+def _save_persisted_config(config: dict[str, Any]) -> tuple[bool, str]:
+    path = _config_file_path()
+    payload = {key: config.get(key) for key in PERSIST_CONFIG_KEYS}
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        return True, f"本地配置已保存：{path}"
+    except Exception as exc:
+        return False, f"保存本地配置失败：{exc}"
+
+
+def _apply_config_to_session(config: dict[str, Any]) -> None:
+    st.session_state.topics = str(config.get("topics", DEFAULT_TOPICS))
+    try:
+        st.session_state.top_k = int(config.get("top_k", 3))
+    except Exception:
+        st.session_state.top_k = 3
+
+    year_raw = config.get("year_range", (2025, 2026))
+    if isinstance(year_raw, (list, tuple)) and len(year_raw) >= 2:
+        try:
+            y0 = int(year_raw[0])
+            y1 = int(year_raw[1])
+            st.session_state.year_range = (y0, y1)
+        except Exception:
+            st.session_state.year_range = (2025, 2026)
+    else:
+        st.session_state.year_range = (2025, 2026)
+
+    st.session_state.focus_questions = str(config.get("focus_questions", ""))
+    st.session_state.aminer_skill_dir = str(config.get("aminer_skill_dir", str(default_aminer_skill_dir())))
+    st.session_state.paper_skill_dir = str(config.get("paper_skill_dir", str(default_paper_skill_dir())))
+    st.session_state.output_dir = str(config.get("output_dir", str(today_output_dir())))
+    st.session_state.aminer_api_key = str(config.get("aminer_api_key", ""))
+    st.session_state.llm_base_url = str(config.get("llm_base_url", "https://api.openai.com/v1"))
+    st.session_state.llm_api_key = str(config.get("llm_api_key", ""))
+    st.session_state.llm_model = str(config.get("llm_model", "gpt-4.1"))
+
+
+def _init_config_state() -> None:
+    if st.session_state.get("config_initialized", False):
+        return
+    merged = _default_config_values()
+    persisted = _load_persisted_config()
+    merged.update({k: v for k, v in persisted.items() if v is not None})
+    _apply_config_to_session(merged)
+    st.session_state.config_initialized = True
+    if "persist_save_status" not in st.session_state:
+        st.session_state.persist_save_status = ""
 
 
 def _truncate_middle(text: str, limit: int = 66) -> str:
@@ -170,12 +278,29 @@ def _refresh_selected_uids() -> None:
     st.session_state.selected_uids = selected
 
 
-def _set_selected_uids(uids: list[str]) -> None:
+def _set_selected_uids(uids: list[str], sync_pick_keys: bool = True) -> None:
     st.session_state.selected_uids = list(uids)
+    if not sync_pick_keys:
+        return
     selected = set(uids)
     for row in st.session_state.filtered_candidates:
         uid = row["uid"]
         st.session_state[f"pick_{uid}"] = uid in selected
+
+
+def _queue_pick_sync(uids: list[str]) -> None:
+    st.session_state.pending_pick_uids = list(uids)
+
+
+def _apply_pending_pick_sync(rows: list[dict[str, Any]]) -> None:
+    pending = st.session_state.get("pending_pick_uids")
+    if pending is None:
+        return
+    selected = set(pending)
+    for row in rows:
+        uid = row["uid"]
+        st.session_state[f"pick_{uid}"] = uid in selected
+    st.session_state.pending_pick_uids = None
 
 
 def _selected_candidates() -> list[PaperCandidate]:
@@ -198,6 +323,8 @@ def _run_stage(stage: str, task_name: str, fn) -> bool:
         fn(engine)
     except Exception as exc:
         detail = str(exc)
+        if stage == "lock" and "cannot be modified after the widget with key" in detail:
+            detail = f"{detail}（检测到状态冲突；已启用延迟同步策略，请重试当前操作）"
         engine.fail(task_id, detail)
         _set_stage_status(stage, "failed")
         _append_stage_error(stage, detail)
@@ -226,6 +353,7 @@ def _recommend(config: dict[str, Any]) -> bool:
         st.session_state.resolved_urls = {}
         st.session_state.downloaded = {}
         st.session_state.artifacts = []
+        st.session_state.pending_pick_uids = None
         for row in st.session_state.filtered_candidates:
             st.session_state[f"pick_{row['uid']}"] = False
         _stage_log("recommend", f"候选: raw={len(raw)} filtered={len(filtered)}")
@@ -250,7 +378,8 @@ def _lock_top_k(config: dict[str, Any]) -> bool:
         selected_set = set(selected)
         ordered = [row["uid"] for row in st.session_state.filtered_candidates if row["uid"] in selected_set]
         ordered = ordered[: int(config["top_k"])]
-        _set_selected_uids(ordered)
+        _set_selected_uids(ordered, sync_pick_keys=False)
+        _queue_pick_sync(ordered)
         st.session_state.active_paper_uid = ordered[0]
         _stage_log("lock", f"锁定论文数: {len(ordered)}")
 
@@ -495,38 +624,77 @@ def _run_auto(config: dict[str, Any]) -> None:
     _validate(config)
 
 
+@st.dialog("高级设置", width="large")
+def _render_advanced_settings_dialog() -> None:
+    st.session_state.aminer_skill_dir = st.text_input("AMiner skill 目录", value=st.session_state.aminer_skill_dir)
+    st.session_state.paper_skill_dir = st.text_input("paper-deep-reading skill 目录", value=st.session_state.paper_skill_dir)
+    st.session_state.output_dir = st.text_input("输出目录", value=st.session_state.output_dir)
+    st.session_state.llm_base_url = st.text_input("PDR_LLM_BASE_URL", value=st.session_state.llm_base_url)
+    st.session_state.aminer_api_key = st.text_input("AMINER_API_KEY", value=st.session_state.aminer_api_key, type="password")
+    st.session_state.llm_api_key = st.text_input("PDR_LLM_API_KEY", value=st.session_state.llm_api_key, type="password")
+
+    current_model = (st.session_state.llm_model or "").strip()
+    model_options = MODEL_PRESETS + ["自定义"]
+    default_choice = "自定义" if current_model not in MODEL_PRESETS else current_model
+    model_choice = st.selectbox("模型选择", options=model_options, index=model_options.index(default_choice))
+    if model_choice == "自定义":
+        custom_default = current_model if current_model and current_model not in MODEL_PRESETS else ""
+        custom_model = st.text_input("自定义模型名", value=custom_default, placeholder="例如: qwen-plus / deepseek-chat")
+        st.session_state.llm_model = custom_model.strip() if custom_model.strip() else current_model
+    else:
+        st.session_state.llm_model = model_choice
+
+    c1, c2 = st.columns(2)
+    with c1:
+        if st.button("显示 AMiner Key", key="adv_show_aminer_key", use_container_width=True):
+            st.session_state.show_aminer_key_confirm = True
+    with c2:
+        if st.button("显示 LLM Key", key="adv_show_llm_key", use_container_width=True):
+            st.session_state.show_llm_key_confirm = True
+    if st.session_state.show_aminer_key_confirm and st.button("确认显示 AMiner 明文", key="adv_confirm_show_aminer_key", use_container_width=True):
+        st.info(st.session_state.aminer_api_key or "未设置")
+        st.session_state.show_aminer_key_confirm = False
+    if st.session_state.show_llm_key_confirm and st.button("确认显示 LLM 明文", key="adv_confirm_show_llm_key", use_container_width=True):
+        st.info(st.session_state.llm_api_key or "未设置")
+        st.session_state.show_llm_key_confirm = False
+
+    c3, c4 = st.columns(2)
+    with c3:
+        if st.button("保存配置到环境变量", key="adv_save_env", use_container_width=True):
+            pairs = [
+                ("AMINER_API_KEY", st.session_state.aminer_api_key),
+                ("PDR_LLM_BASE_URL", st.session_state.llm_base_url),
+                ("PDR_LLM_API_KEY", st.session_state.llm_api_key),
+                ("PDR_LLM_MODEL", st.session_state.llm_model),
+            ]
+            rows = []
+            for key, value in pairs:
+                ok, msg = persist_env_var(key, value)
+                if value:
+                    os.environ[key] = value
+                rows.append(f"{key}: {'OK' if ok else 'WARN'} {msg}")
+            st.success("\n".join(rows))
+    with c4:
+        if st.button("保存配置到本地", key="adv_save_local", use_container_width=True):
+            ok, msg = _save_persisted_config(_config_snapshot())
+            st.session_state.persist_save_status = msg
+            if ok:
+                st.success(msg)
+            else:
+                st.error(msg)
+
+    if st.button("关闭", key="adv_close_dialog", use_container_width=True):
+        st.rerun()
+
+
 def _render_config_drawer() -> dict[str, Any]:
+    _init_config_state()
     if "config_open" not in st.session_state:
         st.session_state.config_open = False
     if "show_aminer_key_confirm" not in st.session_state:
         st.session_state.show_aminer_key_confirm = False
     if "show_llm_key_confirm" not in st.session_state:
         st.session_state.show_llm_key_confirm = False
-
-    if "topics" not in st.session_state:
-        st.session_state.topics = DEFAULT_TOPICS
-    if "top_k" not in st.session_state:
-        st.session_state.top_k = 3
-    if "year_range" not in st.session_state:
-        st.session_state.year_range = (2025, 2026)
-    if "focus_questions" not in st.session_state:
-        st.session_state.focus_questions = ""
-
-    if "aminer_skill_dir" not in st.session_state:
-        st.session_state.aminer_skill_dir = str(default_aminer_skill_dir())
-    if "paper_skill_dir" not in st.session_state:
-        st.session_state.paper_skill_dir = str(default_paper_skill_dir())
-    if "output_dir" not in st.session_state:
-        st.session_state.output_dir = str(today_output_dir())
-
-    if "aminer_api_key" not in st.session_state:
-        st.session_state.aminer_api_key = _env("AMINER_API_KEY")
-    if "llm_base_url" not in st.session_state:
-        st.session_state.llm_base_url = _env("PDR_LLM_BASE_URL", "https://api.openai.com/v1")
-    if "llm_api_key" not in st.session_state:
-        st.session_state.llm_api_key = _env("PDR_LLM_API_KEY")
-    if "llm_model" not in st.session_state:
-        st.session_state.llm_model = _env("PDR_LLM_MODEL", "gpt-4.1")
 
     st.markdown("<div class='panel'>", unsafe_allow_html=True)
     st.markdown("<h3 class='title'>配置抽屉</h3>", unsafe_allow_html=True)
@@ -539,44 +707,25 @@ def _render_config_drawer() -> dict[str, Any]:
         st.session_state.year_range = st.slider("年份范围", min_value=2020, max_value=2026, value=tuple(st.session_state.year_range))
         st.session_state.focus_questions = st.text_area("关注问题（可选）", value=st.session_state.focus_questions, height=92)
 
-        with st.expander("高级设置", expanded=False):
-            st.session_state.aminer_skill_dir = st.text_input("AMiner skill 目录", value=st.session_state.aminer_skill_dir)
-            st.session_state.paper_skill_dir = st.text_input("paper-deep-reading skill 目录", value=st.session_state.paper_skill_dir)
-            st.session_state.output_dir = st.text_input("输出目录", value=st.session_state.output_dir)
-            st.session_state.llm_base_url = st.text_input("PDR_LLM_BASE_URL", value=st.session_state.llm_base_url)
-            st.session_state.llm_model = st.text_input("PDR_LLM_MODEL", value=st.session_state.llm_model)
-            st.session_state.aminer_api_key = st.text_input("AMINER_API_KEY", value=st.session_state.aminer_api_key, type="password")
-            st.session_state.llm_api_key = st.text_input("PDR_LLM_API_KEY", value=st.session_state.llm_api_key, type="password")
-            c1, c2 = st.columns(2)
-            with c1:
-                if st.button("显示 AMiner Key", use_container_width=True):
-                    st.session_state.show_aminer_key_confirm = True
-            with c2:
-                if st.button("显示 LLM Key", use_container_width=True):
-                    st.session_state.show_llm_key_confirm = True
-            if st.session_state.show_aminer_key_confirm and st.button("确认显示 AMiner 明文", use_container_width=True):
-                st.info(st.session_state.aminer_api_key or "未设置")
-                st.session_state.show_aminer_key_confirm = False
-            if st.session_state.show_llm_key_confirm and st.button("确认显示 LLM 明文", use_container_width=True):
-                st.info(st.session_state.llm_api_key or "未设置")
-                st.session_state.show_llm_key_confirm = False
-            if st.button("保存配置到环境变量", use_container_width=True):
-                pairs = [
-                    ("AMINER_API_KEY", st.session_state.aminer_api_key),
-                    ("PDR_LLM_BASE_URL", st.session_state.llm_base_url),
-                    ("PDR_LLM_API_KEY", st.session_state.llm_api_key),
-                    ("PDR_LLM_MODEL", st.session_state.llm_model),
-                ]
-                rows = []
-                for key, value in pairs:
-                    ok, msg = persist_env_var(key, value)
-                    if value:
-                        os.environ[key] = value
-                    rows.append(f"{key}: {'OK' if ok else 'WARN'} {msg}")
-                st.success("\n".join(rows))
-            st.caption("一键流水线作为次级入口保留。")
-            if st.button("运行一键自动流水线", use_container_width=True):
-                _run_auto(_config_snapshot())
+        a, b = st.columns(2)
+        with a:
+            if st.button("高级设置", key="cfg_open_advanced", use_container_width=True):
+                _render_advanced_settings_dialog()
+        with b:
+            if st.button("保存配置到本地", key="cfg_save_local", use_container_width=True):
+                ok, msg = _save_persisted_config(_config_snapshot())
+                st.session_state.persist_save_status = msg
+
+        status_text = st.session_state.get("persist_save_status", "")
+        if status_text:
+            if status_text.startswith("本地配置已保存"):
+                st.success(status_text)
+            else:
+                st.error(status_text)
+
+        st.caption("一键流水线作为次级入口保留。")
+        if st.button("运行一键自动流水线", use_container_width=True):
+            _run_auto(_config_snapshot())
     else:
         st.markdown(
             f"<div class='muted'>主题数：{len(parse_topics(st.session_state.topics))} | Top-K：{st.session_state.top_k} | 年份：{st.session_state.year_range[0]}-{st.session_state.year_range[1]}</div>",
@@ -586,6 +735,11 @@ def _render_config_drawer() -> dict[str, Any]:
             f"<div class='muted'>输出目录：<span class='path' title='{st.session_state.output_dir}'>{_truncate_middle(st.session_state.output_dir, 52)}</span></div>",
             unsafe_allow_html=True,
         )
+        st.markdown(
+            f"<div class='muted'>模型：{st.session_state.llm_model or '未设置'}</div>",
+            unsafe_allow_html=True,
+        )
+
     st.markdown("</div>", unsafe_allow_html=True)
     return _config_snapshot()
 
@@ -658,6 +812,7 @@ def _render_stage(config: dict[str, Any]) -> None:
         if not rows:
             st.warning("请先执行步骤1")
         else:
+            _apply_pending_pick_sync(rows)
             a, b, c = st.columns(3)
             if a.button("全选", use_container_width=True):
                 _set_selected_uids([row["uid"] for row in rows])
@@ -788,6 +943,8 @@ def _init_session() -> None:
         st.session_state.downloaded = {}
     if "artifacts" not in st.session_state:
         st.session_state.artifacts = []
+    if "pending_pick_uids" not in st.session_state:
+        st.session_state.pending_pick_uids = None
 
 
 def main() -> None:
