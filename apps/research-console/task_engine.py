@@ -62,6 +62,13 @@ class TaskEngine:
     def log(self, message: str) -> None:
         self.logs.append(f"{self._now()} {message}")
 
+    def logs_by_stage(self, stage: str, limit: int = 200) -> list[str]:
+        token = f"[stage:{stage}]"
+        rows = [line for line in self.logs if token in line]
+        if limit <= 0:
+            return rows
+        return rows[-limit:]
+
     def _set_status(self, task_id: str, status: str, detail: str = "") -> None:
         if status not in self.VALID_STATUS:
             raise ValueError(f"invalid status: {status}")

@@ -25,40 +25,17 @@
         radial-gradient(700px 360px at 95% -20%, #e7efe6 0, transparent 50%),
         var(--bg);
     }
-    .wrap {
-      width: min(980px, 92vw);
-      margin: 48px auto;
-    }
+    .wrap { width: min(980px, 92vw); margin: 48px auto; }
     .hero {
       border: 1px solid var(--line);
       background: linear-gradient(130deg, rgba(13, 78, 138, 0.10), rgba(13, 122, 102, 0.08) 48%, rgba(255, 255, 255, 0.9));
       border-radius: 18px;
       padding: 28px;
     }
-    .kicker {
-      margin: 0 0 10px 0;
-      color: var(--muted);
-      font-size: 14px;
-      letter-spacing: 0.3px;
-    }
-    h1 {
-      margin: 0;
-      font-size: clamp(30px, 5vw, 44px);
-      line-height: 1.05;
-    }
-    .sub {
-      margin-top: 12px;
-      color: var(--muted);
-      font-size: 16px;
-      line-height: 1.6;
-      max-width: 72ch;
-    }
-    .cta {
-      margin-top: 18px;
-      display: flex;
-      flex-wrap: wrap;
-      gap: 10px;
-    }
+    .kicker { margin: 0 0 10px 0; color: var(--muted); font-size: 14px; letter-spacing: 0.3px; }
+    h1 { margin: 0; font-size: clamp(30px, 5vw, 44px); line-height: 1.05; }
+    .sub { margin-top: 12px; color: var(--muted); font-size: 16px; line-height: 1.6; max-width: 72ch; }
+    .cta { margin-top: 18px; display: flex; flex-wrap: wrap; gap: 10px; }
     .btn {
       display: inline-flex;
       align-items: center;
@@ -71,38 +48,14 @@
       color: var(--ink);
       background: #fff;
     }
-    .btn.primary {
-      border-color: transparent;
-      color: #fff;
-      background: linear-gradient(135deg, var(--accent-2), var(--accent));
-    }
-    .grid {
-      margin-top: 18px;
-      display: grid;
-      grid-template-columns: repeat(3, minmax(0, 1fr));
-      gap: 12px;
-    }
-    .card {
-      border: 1px solid var(--line);
-      background: var(--panel);
-      border-radius: 14px;
-      padding: 14px;
-    }
-    .card h2 {
-      margin: 0 0 8px 0;
-      font-size: 17px;
-    }
-    .card p {
-      margin: 0;
-      color: var(--muted);
-      font-size: 14px;
-      line-height: 1.55;
-    }
-    .foot {
-      margin-top: 16px;
-      font-size: 13px;
-      color: var(--muted);
-    }
+    .btn.primary { border-color: transparent; color: #fff; background: linear-gradient(135deg, var(--accent-2), var(--accent)); }
+    .btn.disabled { opacity: 0.7; cursor: not-allowed; }
+    .grid { margin-top: 18px; display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; }
+    .card { border: 1px solid var(--line); background: var(--panel); border-radius: 14px; padding: 14px; }
+    .card h2 { margin: 0 0 8px 0; font-size: 17px; }
+    .card p { margin: 0; color: var(--muted); font-size: 14px; line-height: 1.55; }
+    .foot { margin-top: 16px; font-size: 13px; color: var(--muted); }
+    code { background: #eef3f8; padding: 2px 6px; border-radius: 6px; }
     @media (max-width: 860px) {
       .wrap { margin: 26px auto; }
       .hero { padding: 20px; }
@@ -116,12 +69,13 @@
       <p class="kicker">AI4Research Workflow</p>
       <h1>Paper-Engine</h1>
       <p class="sub">
-        一个本地优先的论文推荐与研读引擎。它把今日论文推荐、PDF 提取、深度研读报告生成与校验串成一条可复用流水线，适合科研日常和实验室协作。
+        一个本地优先的论文推荐与研读引擎。它把今日论文推荐、PDF 提取、深度研读报告生成与校验串成一条可复用流水线。
       </p>
       <div class="cta">
         <a class="btn primary" href="https://github.com/liaohaoliang2003/Paper-Engine">查看仓库</a>
-        <a class="btn" href="https://github.com/liaohaoliang2003/Paper-Engine/tree/main/apps/research-console">Research Console</a>
+        <a class="btn" href="https://github.com/liaohaoliang2003/Paper-Engine/tree/main/apps/research-console">Research Console 源码</a>
         <a class="btn" href="https://github.com/liaohaoliang2003/Paper-Engine/tree/main/skills/paper-deep-reading">paper-deep-reading skill</a>
+        <a class="btn disabled" href="https://your-streamlit-app-url">在线 Streamlit（占位）</a>
       </div>
     </section>
 
@@ -141,7 +95,8 @@
     </section>
 
     <p class="foot">
-      GitHub Pages 由仓库工作流自动部署。每次推送到 <code>main</code> 都会刷新本页面。
+      本页面是 <strong>GitHub Pages 静态入口</strong>。它不会运行 Streamlit。<br>
+      若要获得与本地一致的交互界面，请将 <code>apps/research-console</code> 部署到 Streamlit Cloud / Render 等支持 Python Web 进程的平台。
     </p>
   </main>
 </body>
