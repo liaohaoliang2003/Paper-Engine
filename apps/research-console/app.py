@@ -19,7 +19,6 @@ from services import (
     default_paper_skill_dir,
     download_pdf,
     filter_candidates,
-    mask_secret,
     parse_topics,
     persist_env_var,
     read_env_var,
@@ -103,7 +102,8 @@ html, body, [class*="css"] {
 .rc-top { border:1px solid var(--line); border-radius:14px; padding:10px 14px; margin-bottom:14px;
   background:linear-gradient(96deg, rgba(15,76,129,.08), rgba(10,122,102,.07) 58%, rgba(255,255,255,.94));}
 .chip { display:inline-flex; border:1px solid var(--line); border-radius:999px; padding:3px 10px; margin:4px 6px 0 0; font-size:12px; color:var(--muted); background:var(--soft);}
-.panel { border:1px solid var(--line); border-radius:14px; background:var(--panel); padding:12px;}
+.hero-wrap { margin: 0 0 8px 0; }
+.hero-title { margin: 0; font-size: 34px; line-height: 1.15; font-weight: 760; letter-spacing: .2px; color: var(--ink); }
 .title { margin:0 0 8px 0; font-size:17px; font-weight:700;}
 .muted { color:var(--muted); font-size:13px; line-height:1.45;}
 .log { border:1px solid var(--line); border-radius:10px; background:#111827; color:#c9d4e4; padding:8px;
@@ -112,6 +112,26 @@ html, body, [class*="css"] {
 .workbench-grid { display:grid; grid-template-columns:1fr; gap:12px; }
 .workbench-head { display:flex; align-items:center; justify-content:space-between; margin-bottom:8px; }
 .section-tag { font-size:11px; color:var(--muted); border:1px solid var(--line); border-radius:999px; padding:2px 8px; }
+.tab-note { margin: 0 0 10px 0; color: var(--muted); font-size: 13px; }
+.kv-line { display:flex; align-items:center; justify-content:space-between; gap:10px; margin-bottom:8px; }
+.kv-label { color: var(--muted); font-size: 14px; }
+.kv-chip { display:inline-flex; align-items:center; border-radius:999px; padding:2px 10px; font-size:12px; border:1px solid var(--line); }
+.kv-chip.ok { background:#edf7f3; color:#0f6b4a; border-color:#b8dbc9; }
+.kv-chip.warn { background:#fff6f4; color:#9b3f30; border-color:#efc9c0; }
+.st-key-adv_fab_zone { position: sticky; top: 8px; z-index: 20; margin-bottom: 8px; }
+.st-key-adv_fab_zone .stButton { text-align: right; }
+.st-key-adv_fab_zone .stButton > button {
+  width: auto;
+  min-height: 32px;
+  border-radius: 999px;
+  border: 1px solid var(--line);
+  background: #f7f9fc;
+  color: var(--muted);
+  padding: 0.2rem 0.7rem;
+  font-size: 12px;
+  font-weight: 600;
+}
+.st-key-adv_fab_zone .stButton > button:hover { background:#eef3f8; color:#44546b; }
 @media (max-width: 1024px) { .workbench-grid { gap:10px; } }
 </style>
 """,
@@ -892,7 +912,6 @@ def _config_snapshot() -> dict[str, Any]:
 
 def _render_topbar(config: dict[str, Any]) -> None:
     chips = [
-        "<span class='chip'>Research Console V3</span>",
         f"<span class='chip'>日期：{date.today()}</span>",
         "<span class='chip'>交互：工作台模式</span>",
         f"<span class='chip'>模式：{config['integration_mode']}</span>",
@@ -907,236 +926,306 @@ def _render_topbar(config: dict[str, Any]) -> None:
         st.info(notice)
 
 
-def _render_recommend_workbench(config: dict[str, Any]) -> None:
-    st.markdown("<div class='panel'>", unsafe_allow_html=True)
-    st.markdown(
-        "<div class='workbench-head'><h3 class='title'>推荐工作台</h3><span class='section-tag'>随时获取候选并加入下载队列</span></div>",
-        unsafe_allow_html=True,
+def _render_main_title() -> None:
+    st.markdown("<div class='hero-wrap'><h1 class='hero-title'>Paper Engine 论文工作台</h1></div>", unsafe_allow_html=True)
+
+
+def _render_global_advanced_entry() -> None:
+    with st.container(key="adv_fab_zone"):
+        col1, col2 = st.columns([9, 1])
+        with col2:
+            if st.button("⚙ 高级设置", key="global_open_advanced", help="打开高级设置"):
+                _render_advanced_settings_dialog()
+
+
+def _render_recommend_config_inputs() -> None:
+    st.markdown("<div class='tab-note'>在此配置推荐主题、Top-K、年份和关注问题。</div>", unsafe_allow_html=True)
+    st.text_area(
+        "推荐主题（逗号/换行）",
+        height=96,
+        key="topics",
     )
-    c1, c2 = st.columns([2, 1])
+    c1, c2 = st.columns(2)
     with c1:
-        if st.button("获取推荐", type="primary", use_container_width=True):
-            _recommend(config)
+        st.slider(
+            "Top-K",
+            min_value=1,
+            max_value=5,
+            key="top_k",
+        )
     with c2:
-        if st.button("清空推荐结果", use_container_width=True):
-            st.session_state.recommend_rows = []
-            st.session_state.recommend_selected_uids = []
-            st.session_state.download_queue_uids = []
+        st.slider(
+            "年份范围",
+            min_value=2020,
+            max_value=2026,
+            key="year_range",
+        )
+    st.text_area(
+        "关注问题（可选）",
+        height=72,
+        key="focus_questions",
+    )
 
-    rows = st.session_state.recommend_rows
-    if not rows:
-        st.info("暂无推荐结果。你可以随时点击“获取推荐”。")
-        st.markdown("</div>", unsafe_allow_html=True)
-        return
+    a, b = st.columns([1, 1])
+    with a:
+        if st.button("保存推荐配置到本地", key="rec_save_local_cfg", use_container_width=True):
+            ok, msg = _save_persisted_config(_config_snapshot())
+            st.session_state.persist_save_status = msg
+            if ok:
+                st.success(msg)
+            else:
+                st.error(msg)
+    with b:
+        if st.button("一键自动流水线（可选）", key="rec_run_auto", use_container_width=True):
+            _run_auto(_config_snapshot())
 
-    _apply_pending_recommend_pick_sync(rows)
-    b1, b2, b3 = st.columns(3)
-    if b1.button("全选候选", use_container_width=True):
-        _set_recommend_selected_uids([row["uid"] for row in rows])
-    if b2.button("清空选择", use_container_width=True):
-        _set_recommend_selected_uids([])
-    if b3.button("仅近两年", use_container_width=True):
-        threshold = date.today().year - 1
-        _set_recommend_selected_uids([row["uid"] for row in rows if int(row.get("year") or 0) >= threshold])
 
-    st.markdown("---")
-    for row in rows:
-        uid = row["uid"]
-        title = row.get("title") or uid
-        year_text = row.get("year") or "N/A"
-        st.checkbox(f"{title} ({year_text})", value=uid in st.session_state.recommend_selected_uids, key=f"rec_pick_{uid}")
-    _refresh_recommend_selected()
+def _render_recommend_workbench(config: dict[str, Any]) -> None:
+    with st.container(border=True):
+        st.markdown(
+            "<div class='workbench-head'><h3 class='title'>推荐工作台</h3><span class='section-tag'>随时获取候选并加入下载队列</span></div>",
+            unsafe_allow_html=True,
+        )
+        _render_recommend_config_inputs()
+        st.markdown("---")
+        c1, c2 = st.columns([2, 1])
+        with c1:
+            if st.button("获取推荐", type="primary", use_container_width=True):
+                _recommend(config)
+        with c2:
+            if st.button("清空推荐结果", key="rec_clear_results", use_container_width=True):
+                st.session_state.recommend_rows = []
+                st.session_state.recommend_selected_uids = []
+                st.session_state.download_queue_uids = []
 
-    q1, q2 = st.columns([2, 1])
-    with q1:
-        if st.button("加入下载队列（按 Top-K 截断）", use_container_width=True):
-            if _add_selection_to_download_queue(config):
-                st.success(f"下载队列已更新：{len(st.session_state.download_queue_uids)} 项")
-    with q2:
-        st.markdown(f"<div class='muted'>当前队列：{len(st.session_state.download_queue_uids)} 项</div>", unsafe_allow_html=True)
+        rows = st.session_state.recommend_rows
+        if not rows:
+            st.info("暂无推荐结果。你可以随时点击“获取推荐”。")
+            return
 
-    preview = [{"标题": r["title"], "年份": r.get("year") or "N/A"} for r in rows[:20]]
-    st.dataframe(preview, use_container_width=True, hide_index=True)
-    st.markdown("</div>", unsafe_allow_html=True)
+        _apply_pending_recommend_pick_sync(rows)
+        b1, b2, b3 = st.columns(3)
+        if b1.button("全选候选", key="rec_pick_all", use_container_width=True):
+            _set_recommend_selected_uids([row["uid"] for row in rows])
+        if b2.button("清空选择", key="rec_pick_none", use_container_width=True):
+            _set_recommend_selected_uids([])
+        if b3.button("仅近两年", key="rec_pick_recent", use_container_width=True):
+            threshold = date.today().year - 1
+            _set_recommend_selected_uids([row["uid"] for row in rows if int(row.get("year") or 0) >= threshold])
+
+        st.markdown("---")
+        for row in rows:
+            uid = row["uid"]
+            title = row.get("title") or uid
+            year_text = row.get("year") or "N/A"
+            st.checkbox(f"{title} ({year_text})", value=uid in st.session_state.recommend_selected_uids, key=f"rec_pick_{uid}")
+        _refresh_recommend_selected()
+
+        q1, q2 = st.columns([2, 1])
+        with q1:
+            if st.button("加入下载队列（按 Top-K 截断）", key="rec_add_queue", use_container_width=True):
+                if _add_selection_to_download_queue(config):
+                    st.success(f"下载队列已更新：{len(st.session_state.download_queue_uids)} 项")
+        with q2:
+            st.markdown(f"<div class='muted'>当前队列：{len(st.session_state.download_queue_uids)} 项</div>", unsafe_allow_html=True)
+
+        preview = [{"标题": r["title"], "年份": r.get("year") or "N/A"} for r in rows[:20]]
+        st.dataframe(preview, use_container_width=True, hide_index=True)
 
 
 def _render_kb_workbench(config: dict[str, Any]) -> None:
-    st.markdown("<div class='panel'>", unsafe_allow_html=True)
-    st.markdown(
-        "<div class='workbench-head'><h3 class='title'>知识库工作台</h3><span class='section-tag'>推荐下载 + 手动 URL + 本地上传</span></div>",
-        unsafe_allow_html=True,
-    )
-    if st.button("刷新知识库索引", use_container_width=True):
-        _refresh_kb_files(config)
+    with st.container(border=True):
+        st.markdown(
+            "<div class='workbench-head'><h3 class='title'>知识库工作台</h3><span class='section-tag'>推荐下载 + 手动 URL + 本地上传</span></div>",
+            unsafe_allow_html=True,
+        )
+        if st.button("刷新知识库索引", key="kb_refresh", use_container_width=True):
+            _refresh_kb_files(config)
 
-    queue = list(st.session_state.download_queue_uids)
-    if queue:
-        st.markdown("##### 推荐队列下载")
-        st.caption(f"待下载 {len(queue)} 项（来源：推荐工作台）")
-        if st.button("下载队列论文到知识库", type="primary", use_container_width=True):
-            _download_from_queue(config)
-    else:
-        st.info("推荐下载队列为空，可先在“推荐工作台”勾选候选并加入队列。")
+        queue = list(st.session_state.download_queue_uids)
+        if queue:
+            st.markdown("##### 推荐队列下载")
+            st.caption(f"待下载 {len(queue)} 项（来源：推荐工作台）")
+            if st.button("下载队列论文到知识库", key="kb_download_queue", type="primary", use_container_width=True):
+                _download_from_queue(config)
+        else:
+            st.info("推荐下载队列为空，可先在“推荐工作台”勾选候选并加入队列。")
 
-    st.markdown("---")
-    st.markdown("##### 手动 URL 入库")
-    st.session_state.kb_manual_urls = st.text_area(
-        "每行一个 PDF URL",
-        value=st.session_state.kb_manual_urls,
-        height=96,
-        placeholder="https://arxiv.org/pdf/xxxx.xxxxx.pdf",
-    )
-    if st.button("下载手动 URL 到知识库", use_container_width=True):
-        _download_manual_urls(config)
+        st.markdown("---")
+        st.markdown("##### 手动 URL 入库")
+        st.session_state.kb_manual_urls = st.text_area(
+            "每行一个 PDF URL",
+            value=st.session_state.kb_manual_urls,
+            height=96,
+            placeholder="https://arxiv.org/pdf/xxxx.xxxxx.pdf",
+            key="kb_manual_urls_input",
+        )
+        if st.button("下载手动 URL 到知识库", key="kb_download_manual", use_container_width=True):
+            _download_manual_urls(config)
 
-    st.markdown("---")
-    st.markdown("##### 本地 PDF 上传")
-    uploaded = st.file_uploader(
-        "选择本地 PDF 文件（可多选）",
-        type=["pdf"],
-        accept_multiple_files=True,
-        key="kb_upload_files",
-    )
-    if st.button("上传文件到知识库", use_container_width=True):
-        _upload_local_pdfs(uploaded or [], config)
+        st.markdown("---")
+        st.markdown("##### 本地 PDF 上传")
+        uploaded = st.file_uploader(
+            "选择本地 PDF 文件（可多选）",
+            type=["pdf"],
+            accept_multiple_files=True,
+            key="kb_upload_files",
+        )
+        if st.button("上传文件到知识库", key="kb_upload_local", use_container_width=True):
+            _upload_local_pdfs(uploaded or [], config)
 
-    st.markdown("---")
-    st.markdown("##### 当前知识库 PDF")
-    kb_rows = st.session_state.kb_files
-    if not kb_rows:
-        st.info("知识库为空，请先下载或上传 PDF。")
-    else:
-        view = [
-            {
-                "文件名": row["name"],
-                "大小(KB)": row["size_kb"],
-                "更新时间(时间戳)": int(row["mtime"]),
-            }
-            for row in kb_rows[:200]
-        ]
-        st.dataframe(view, use_container_width=True, hide_index=True)
-    st.markdown("</div>", unsafe_allow_html=True)
+        st.markdown("---")
+        st.markdown("##### 当前知识库 PDF")
+        kb_rows = st.session_state.kb_files
+        if not kb_rows:
+            st.info("知识库为空，请先下载或上传 PDF。")
+        else:
+            view = [
+                {
+                    "文件名": row["name"],
+                    "大小(KB)": row["size_kb"],
+                    "更新时间(时间戳)": int(row["mtime"]),
+                }
+                for row in kb_rows[:200]
+            ]
+            st.dataframe(view, use_container_width=True, hide_index=True)
 
 
 def _render_read_workbench(config: dict[str, Any]) -> None:
-    st.markdown("<div class='panel'>", unsafe_allow_html=True)
-    st.markdown(
-        "<div class='workbench-head'><h3 class='title'>研读工作台</h3><span class='section-tag'>从知识库选择并自动校验</span></div>",
-        unsafe_allow_html=True,
-    )
-    kb_rows = st.session_state.kb_files
-    if not kb_rows:
-        st.info("知识库暂无 PDF，请先在“知识库工作台”入库。")
-        st.markdown("</div>", unsafe_allow_html=True)
-        return
+    with st.container(border=True):
+        st.markdown(
+            "<div class='workbench-head'><h3 class='title'>研读工作台</h3><span class='section-tag'>从知识库选择并自动校验</span></div>",
+            unsafe_allow_html=True,
+        )
+        kb_rows = st.session_state.kb_files
+        if not kb_rows:
+            st.info("知识库暂无 PDF，请先在“知识库工作台”入库。")
+            return
 
-    options: list[str] = []
-    label_to_path: dict[str, str] = {}
-    for row in kb_rows:
-        path = row["path"]
-        label = f"{row['name']} ({row['size_kb']} KB)"
-        options.append(label)
-        label_to_path[label] = path
+        options: list[str] = []
+        label_to_path: dict[str, str] = {}
+        for row in kb_rows:
+            path = row["path"]
+            label = f"{row['name']} ({row['size_kb']} KB)"
+            options.append(label)
+            label_to_path[label] = path
 
-    current_selected = set(st.session_state.reading_targets)
-    default_labels = [label for label in options if label_to_path[label] in current_selected]
-    chosen_labels = st.multiselect(
-        "选择要研读的论文 PDF（可多选）",
-        options=options,
-        default=default_labels,
-    )
-    st.session_state.reading_targets = [label_to_path[label] for label in chosen_labels]
+        current_selected = set(st.session_state.reading_targets)
+        default_labels = [label for label in options if label_to_path[label] in current_selected]
+        chosen_labels = st.multiselect(
+            "选择要研读的论文 PDF（可多选）",
+            options=options,
+            default=default_labels,
+            key="read_targets_multiselect",
+        )
+        st.session_state.reading_targets = [label_to_path[label] for label in chosen_labels]
 
-    r1, r2 = st.columns([2, 1])
-    with r1:
-        if st.button("开始研读并自动校验", type="primary", use_container_width=True):
-            _read_selected_pdfs(config)
-    with r2:
-        if st.button("选择最新 Top-K", use_container_width=True):
-            latest = [row["path"] for row in kb_rows[: int(config["top_k"])]]
-            st.session_state.reading_targets = latest
-            st.rerun()
+        r1, r2 = st.columns([2, 1])
+        with r1:
+            if st.button("开始研读并自动校验", key="read_start", type="primary", use_container_width=True):
+                _read_selected_pdfs(config)
+        with r2:
+            if st.button("选择最新 Top-K", key="read_pick_latest", use_container_width=True):
+                latest = [row["path"] for row in kb_rows[: int(config["top_k"])]]
+                st.session_state.reading_targets = latest
+                st.rerun()
 
-    if st.session_state.reading_targets:
-        st.markdown("##### 当前研读目标")
-        for path in st.session_state.reading_targets:
-            st.markdown(f"- `{_truncate_middle(path, 100)}`")
-    st.markdown("</div>", unsafe_allow_html=True)
+        if st.session_state.reading_targets:
+            st.markdown("##### 当前研读目标")
+            for path in st.session_state.reading_targets:
+                st.markdown(f"- `{_truncate_middle(path, 100)}`")
 
 
 def _render_workbench(config: dict[str, Any]) -> None:
-    st.markdown("<div class='workbench-grid'>", unsafe_allow_html=True)
-    _render_recommend_workbench(config)
-    _render_kb_workbench(config)
-    _render_read_workbench(config)
-    st.markdown("</div>", unsafe_allow_html=True)
+    t1, t2, t3 = st.tabs(["推荐工作台", "知识库工作台", "研读工作台"])
+    with t1:
+        _render_recommend_workbench(config)
+    with t2:
+        _render_kb_workbench(config)
+    with t3:
+        _render_read_workbench(config)
 
 
 def _render_context(config: dict[str, Any]) -> None:
-    st.markdown("<div class='panel'>", unsafe_allow_html=True)
-    st.markdown("<h3 class='title'>上下文侧栏</h3>", unsafe_allow_html=True)
-    st.markdown(f"<div class='muted'>AMiner Key：`{mask_secret(config['aminer_api_key']) or '未设置'}`</div>", unsafe_allow_html=True)
-    st.markdown(f"<div class='muted'>LLM Key：`{mask_secret(config['llm_api_key']) or '未设置'}`</div>", unsafe_allow_html=True)
-
-    options = ["(自动)"]
-    uid_map = {"(自动)": ""}
-    for row in st.session_state.kb_files:
-        uid = row["path"]
-        label = f"{_truncate_middle(Path(uid).stem, 22)} [{_truncate_middle(uid, 18)}]"
-        options.append(label)
-        uid_map[label] = uid
-    selected_label = st.selectbox("当前论文上下文", options=options, key="ctx_uid_select")
-    selected_uid = uid_map[selected_label]
-    if selected_uid:
-        st.session_state.active_paper_uid = selected_uid
-
-    action_options = ["all", "recommend", "download", "upload", "read", "validate", "system"]
-    action = st.selectbox("操作日志过滤", options=action_options, format_func=lambda x: "全部" if x == "all" else _action_label(x))
-    logs = _logs_by_action(action, limit=220) or st.session_state.engine.logs[-120:]
-    safe = "\n".join(logs).replace("<", "&lt;").replace(">", "&gt;")
-    st.markdown("<div class='muted' style='margin-top:8px'>操作日志</div>", unsafe_allow_html=True)
-    st.markdown(f"<div class='log'>{safe.replace(chr(10), '<br/>')}</div>", unsafe_allow_html=True)
-
-    st.markdown("<div class='muted' style='margin-top:10px'>产物索引</div>", unsafe_allow_html=True)
-    shown = 0
-    focus_uid = st.session_state.active_paper_uid
-    visible_artifacts = []
-    for item in st.session_state.artifacts:
-        uid = item.get("uid", "")
-        if focus_uid and uid and uid != focus_uid:
-            continue
-        shown += 1
-        visible_artifacts.append(item)
+    with st.container(border=True):
+        st.markdown("<h3 class='title'>上下文侧栏</h3>", unsafe_allow_html=True)
+        aminer_ready = bool(str(config.get("aminer_api_key", "")).strip())
+        llm_ready = bool(str(config.get("llm_api_key", "")).strip())
+        aminer_chip = "ok" if aminer_ready else "warn"
+        llm_chip = "ok" if llm_ready else "warn"
+        aminer_text = "已配置" if aminer_ready else "未配置"
+        llm_text = "已配置" if llm_ready else "未配置"
         st.markdown(
-            f"- `{item['kind']}` <span class='path' title='{item['path']}'>{_truncate_middle(item['path'], 54)}</span>",
+            f"<div class='kv-line'><span class='kv-label'>AMiner Key</span><span class='kv-chip {aminer_chip}'>{aminer_text}</span></div>",
             unsafe_allow_html=True,
         )
-    if shown == 0:
-        st.info("当前上下文暂无产物")
-    else:
-        options = [f"{idx + 1}. {item['kind']}" for idx, item in enumerate(visible_artifacts)]
-        selected = st.selectbox("完整路径（可复制）", options=options)
-        selected_idx = options.index(selected)
-        st.code(visible_artifacts[selected_idx]["path"], language=None)
+        st.markdown(
+            f"<div class='kv-line'><span class='kv-label'>LLM Key</span><span class='kv-chip {llm_chip}'>{llm_text}</span></div>",
+            unsafe_allow_html=True,
+        )
 
-    errors: list[str] = []
-    if action == "all":
-        for key in ["recommend", "download", "upload", "read", "validate"]:
-            errors.extend(st.session_state.action_errors.get(key, []))
-    else:
-        errors = st.session_state.action_errors.get(action, [])
-    st.markdown("<div class='muted' style='margin-top:10px'>错误定位卡</div>", unsafe_allow_html=True)
-    if errors:
-        for err in errors[-8:]:
-            st.error(err)
-    else:
-        st.success("当前操作无错误")
-    st.markdown("</div>", unsafe_allow_html=True)
+        options = ["(自动)"]
+        uid_map = {"(自动)": ""}
+        for row in st.session_state.kb_files:
+            uid = row["path"]
+            label = f"{_truncate_middle(Path(uid).stem, 22)} [{_truncate_middle(uid, 18)}]"
+            options.append(label)
+            uid_map[label] = uid
+        selected_label = st.selectbox("当前论文上下文", options=options, key="ctx_uid_select")
+        selected_uid = uid_map[selected_label]
+        if selected_uid:
+            st.session_state.active_paper_uid = selected_uid
+
+        action_options = ["all", "recommend", "download", "upload", "read", "validate", "system"]
+        action = st.selectbox("操作日志过滤", options=action_options, format_func=lambda x: "全部" if x == "all" else _action_label(x))
+        logs = _logs_by_action(action, limit=220) or st.session_state.engine.logs[-120:]
+        safe = "\n".join(logs).replace("<", "&lt;").replace(">", "&gt;")
+        st.markdown("<div class='muted' style='margin-top:8px'>操作日志</div>", unsafe_allow_html=True)
+        st.markdown(f"<div class='log'>{safe.replace(chr(10), '<br/>')}</div>", unsafe_allow_html=True)
+
+        st.markdown("<div class='muted' style='margin-top:10px'>产物索引</div>", unsafe_allow_html=True)
+        shown = 0
+        focus_uid = st.session_state.active_paper_uid
+        visible_artifacts = []
+        for item in st.session_state.artifacts:
+            uid = item.get("uid", "")
+            if focus_uid and uid and uid != focus_uid:
+                continue
+            shown += 1
+            visible_artifacts.append(item)
+            st.markdown(
+                f"- `{item['kind']}` <span class='path' title='{item['path']}'>{_truncate_middle(item['path'], 54)}</span>",
+                unsafe_allow_html=True,
+            )
+        if shown == 0:
+            st.info("当前上下文暂无产物")
+        else:
+            options = [f"{idx + 1}. {item['kind']}" for idx, item in enumerate(visible_artifacts)]
+            selected = st.selectbox("完整路径（可复制）", options=options)
+            selected_idx = options.index(selected)
+            st.code(visible_artifacts[selected_idx]["path"], language=None)
+
+        errors: list[str] = []
+        if action == "all":
+            for key in ["recommend", "download", "upload", "read", "validate"]:
+                errors.extend(st.session_state.action_errors.get(key, []))
+        else:
+            errors = st.session_state.action_errors.get(action, [])
+        st.markdown("<div class='muted' style='margin-top:10px'>错误定位卡</div>", unsafe_allow_html=True)
+        if errors:
+            for err in errors[-8:]:
+                st.error(err)
+        else:
+            st.success("当前操作无错误")
 
 
 def _init_session() -> None:
     if "engine" not in st.session_state:
         st.session_state.engine = TaskEngine()
+    if "show_aminer_key_confirm" not in st.session_state:
+        st.session_state.show_aminer_key_confirm = False
+    if "show_llm_key_confirm" not in st.session_state:
+        st.session_state.show_llm_key_confirm = False
     if "active_paper_uid" not in st.session_state:
         st.session_state.active_paper_uid = ""
     if "action_errors" not in st.session_state:
@@ -1169,11 +1258,13 @@ def _init_session() -> None:
 
 def main() -> None:
     _init_session()
-    left, center, right = st.columns([3, 6, 3], gap="medium")
-    with left:
-        config = _render_config_drawer()
+    _init_config_state()
+    config = _config_snapshot()
     _refresh_kb_files(config)
+    _render_main_title()
+    _render_global_advanced_entry()
     _render_topbar(config)
+    center, right = st.columns([8, 3], gap="medium")
     with center:
         _render_workbench(config)
     with right:
