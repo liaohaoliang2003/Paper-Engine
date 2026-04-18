@@ -118,6 +118,20 @@ html, body, [class*="css"] {
 .kv-chip { display:inline-flex; align-items:center; border-radius:999px; padding:2px 10px; font-size:12px; border:1px solid var(--line); }
 .kv-chip.ok { background:#edf7f3; color:#0f6b4a; border-color:#b8dbc9; }
 .kv-chip.warn { background:#fff6f4; color:#9b3f30; border-color:#efc9c0; }
+.topic-add-wrap { margin: 4px 0 8px 0; }
+[class*="st-key-topic_chip_"] button {
+  border-radius: 999px;
+  border: 1px solid #c7d2e1;
+  background: #f3f7fc;
+  color: #4b5b73;
+  font-size: 12px;
+  min-height: 30px;
+  padding: 0.15rem 0.6rem;
+}
+[class*="st-key-topic_chip_"] button:hover {
+  background: #e8eff9;
+  border-color: #b6c4d8;
+}
 .st-key-adv_fab_zone { position: sticky; top: 8px; z-index: 20; margin-bottom: 8px; }
 .st-key-adv_fab_zone .stButton { text-align: right; }
 .st-key-adv_fab_zone .stButton > button {
@@ -847,7 +861,7 @@ def _render_config_drawer() -> dict[str, Any]:
 
     if st.session_state.config_open:
         st.session_state.topics = st.text_area("推荐主题（逗号/换行）", value=st.session_state.topics, height=120)
-        st.session_state.top_k = st.slider("Top-K", min_value=1, max_value=5, value=int(st.session_state.top_k))
+        st.session_state.top_k = st.slider("推荐论文数量", min_value=1, max_value=5, value=int(st.session_state.top_k))
         st.session_state.year_range = st.slider("年份范围", min_value=2020, max_value=2026, value=tuple(st.session_state.year_range))
         st.session_state.focus_questions = st.text_area("关注问题（可选）", value=st.session_state.focus_questions, height=92)
 
@@ -872,7 +886,7 @@ def _render_config_drawer() -> dict[str, Any]:
             _run_auto(_config_snapshot())
     else:
         st.markdown(
-            f"<div class='muted'>主题数：{len(parse_topics(st.session_state.topics))} | Top-K：{st.session_state.top_k} | 年份：{st.session_state.year_range[0]}-{st.session_state.year_range[1]}</div>",
+            f"<div class='muted'>主题数：{len(parse_topics(st.session_state.topics))} | 推荐论文数量：{st.session_state.top_k} | 年份：{st.session_state.year_range[0]}-{st.session_state.year_range[1]}</div>",
             unsafe_allow_html=True,
         )
         st.markdown(
@@ -938,17 +952,74 @@ def _render_global_advanced_entry() -> None:
                 _render_advanced_settings_dialog()
 
 
+def _sync_topics_list_from_text(*, force: bool = False) -> None:
+    topics_text = str(st.session_state.get("topics", ""))
+    parsed = parse_topics(topics_text)
+    if force or "topics_list" not in st.session_state:
+        st.session_state.topics_list = parsed
+        st.session_state.topics_list_mirror = topics_text
+        return
+    if topics_text != st.session_state.get("topics_list_mirror", ""):
+        st.session_state.topics_list = parsed
+        st.session_state.topics_list_mirror = topics_text
+
+
+def _sync_topics_text_from_list() -> None:
+    rows = [str(x).strip() for x in st.session_state.get("topics_list", []) if str(x).strip()]
+    dedup: list[str] = []
+    for item in rows:
+        if item not in dedup:
+            dedup.append(item)
+    st.session_state.topics_list = dedup
+    text = ", ".join(dedup)
+    st.session_state.topics = text
+    st.session_state.topics_list_mirror = text
+
+
 def _render_recommend_config_inputs() -> None:
-    st.markdown("<div class='tab-note'>在此配置推荐主题、Top-K、年份和关注问题。</div>", unsafe_allow_html=True)
-    st.text_area(
-        "推荐主题（逗号/换行）",
-        height=96,
-        key="topics",
-    )
+    _sync_topics_list_from_text()
+    st.markdown("<div class='tab-note'>在此配置推荐主题、推荐论文数量、年份和关注问题。</div>", unsafe_allow_html=True)
+
+    st.markdown("<div class='topic-add-wrap'></div>", unsafe_allow_html=True)
+    add_col, btn_col = st.columns([5, 1])
+    with add_col:
+        st.text_input("新增主题", key="topic_new_input", placeholder="输入主题后点击添加，例如：AI for Research")
+    with btn_col:
+        st.markdown("<div style='height: 27px'></div>", unsafe_allow_html=True)
+        if st.button("添加", key="topic_add_btn", use_container_width=True):
+            new_items = parse_topics(st.session_state.get("topic_new_input", ""))
+            if new_items:
+                current = list(st.session_state.get("topics_list", []))
+                for item in new_items:
+                    if item not in current:
+                        current.append(item)
+                st.session_state.topics_list = current
+                _sync_topics_text_from_list()
+            st.session_state.topic_new_input = ""
+
+    topics = list(st.session_state.get("topics_list", []))
+    if topics:
+        st.markdown("##### 已选主题（点击气泡可删除）")
+        remove_idx = None
+        row_cols = []
+        for idx, topic in enumerate(topics):
+            if idx % 3 == 0:
+                row_cols = st.columns(3)
+            with row_cols[idx % 3]:
+                if st.button(f"× {topic}", key=f"topic_chip_{idx}", use_container_width=True):
+                    remove_idx = idx
+        if remove_idx is not None:
+            topics.pop(remove_idx)
+            st.session_state.topics_list = topics
+            _sync_topics_text_from_list()
+            st.rerun()
+    else:
+        st.info("暂无主题，请先添加至少一个主题。")
+
     c1, c2 = st.columns(2)
     with c1:
         st.slider(
-            "Top-K",
+            "推荐论文数量",
             min_value=1,
             max_value=5,
             key="top_k",
@@ -1023,7 +1094,7 @@ def _render_recommend_workbench(config: dict[str, Any]) -> None:
 
         q1, q2 = st.columns([2, 1])
         with q1:
-            if st.button("加入下载队列（按 Top-K 截断）", key="rec_add_queue", use_container_width=True):
+            if st.button("加入下载队列（按推荐论文数量截断）", key="rec_add_queue", use_container_width=True):
                 if _add_selection_to_download_queue(config):
                     st.success(f"下载队列已更新：{len(st.session_state.download_queue_uids)} 项")
         with q2:
@@ -1125,7 +1196,7 @@ def _render_read_workbench(config: dict[str, Any]) -> None:
             if st.button("开始研读并自动校验", key="read_start", type="primary", use_container_width=True):
                 _read_selected_pdfs(config)
         with r2:
-            if st.button("选择最新 Top-K", key="read_pick_latest", use_container_width=True):
+            if st.button("选择最新 N 篇（按推荐论文数量）", key="read_pick_latest", use_container_width=True):
                 latest = [row["path"] for row in kb_rows[: int(config["top_k"])]]
                 st.session_state.reading_targets = latest
                 st.rerun()
@@ -1254,11 +1325,18 @@ def _init_session() -> None:
         st.session_state.pending_recommend_pick_uids = None
     if "integration_notice" not in st.session_state:
         st.session_state.integration_notice = ""
+    if "topics_list" not in st.session_state:
+        st.session_state.topics_list = []
+    if "topics_list_mirror" not in st.session_state:
+        st.session_state.topics_list_mirror = ""
+    if "topic_new_input" not in st.session_state:
+        st.session_state.topic_new_input = ""
 
 
 def main() -> None:
     _init_session()
     _init_config_state()
+    _sync_topics_list_from_text(force=True)
     config = _config_snapshot()
     _refresh_kb_files(config)
     _render_main_title()
