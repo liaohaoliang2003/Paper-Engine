@@ -39,14 +39,14 @@ st.set_page_config(
     initial_sidebar_state="collapsed",
 )
 
-STAGES = [
-    ("recommend", "获取推荐"),
-    ("lock", "锁定 Top-K"),
-    ("download", "下载 PDF"),
-    ("read", "生成报告"),
-    ("validate", "校验完成"),
-]
-STAGE_INDEX = {key: idx for idx, (key, _) in enumerate(STAGES)}
+ACTION_LABELS = {
+    "recommend": "获取推荐",
+    "download": "下载入库",
+    "upload": "本地上传",
+    "read": "生成报告",
+    "validate": "自动校验",
+    "system": "系统事件",
+}
 DEFAULT_TOPICS = (
     "AI for Research, autonomous research agents, literature review automation, "
     "hypothesis generation, experiment planning, tool-use for scientific workflows"
@@ -106,18 +106,13 @@ html, body, [class*="css"] {
 .panel { border:1px solid var(--line); border-radius:14px; background:var(--panel); padding:12px;}
 .title { margin:0 0 8px 0; font-size:17px; font-weight:700;}
 .muted { color:var(--muted); font-size:13px; line-height:1.45;}
-.stepper { display:grid; grid-template-columns:repeat(5,minmax(0,1fr)); gap:8px; margin:10px 0 14px;}
-.step { border:1px solid var(--line); background:var(--soft); border-radius:10px; padding:8px; min-height:56px;}
-.step.current { border-color:#7db4a8; background:#eff8f5;}
-.step.success { border-color:#9fcfbe; background:#f3fbf8;}
-.step.failed { border-color:#f2b9af; background:#fff5f4;}
-.idx { font-size:11px; color:var(--muted);}
-.label { margin-top:2px; font-size:13px; font-weight:600;}
-.state { margin-top:4px; font-size:11px; color:var(--muted);}
 .log { border:1px solid var(--line); border-radius:10px; background:#111827; color:#c9d4e4; padding:8px;
   max-height:350px; overflow:auto; font-size:12px; line-height:1.45; font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;}
 .path { border-bottom:1px dashed var(--line); }
-@media (max-width: 1024px) { .stepper { grid-template-columns: 1fr; } }
+.workbench-grid { display:grid; grid-template-columns:1fr; gap:12px; }
+.workbench-head { display:flex; align-items:center; justify-content:space-between; margin-bottom:8px; }
+.section-tag { font-size:11px; color:var(--muted); border:1px solid var(--line); border-radius:999px; padding:2px 8px; }
+@media (max-width: 1024px) { .workbench-grid { gap:10px; } }
 </style>
 """,
     unsafe_allow_html=True,
@@ -256,7 +251,7 @@ def _init_config_state() -> None:
 def _set_integration_notice(message: str) -> None:
     st.session_state.integration_notice = message
     if message:
-        _stage_log(st.session_state.current_stage, message)
+        _action_log("system", message)
 
 
 def _fallback_to_builtin(config: dict[str, Any], *, reason: str) -> None:
@@ -282,42 +277,35 @@ def _candidate_from_row(row: dict[str, Any]) -> PaperCandidate:
     return PaperCandidate(**row)
 
 
-def _stage_label(stage: str) -> str:
-    for key, label in STAGES:
-        if key == stage:
-            return label
-    return stage
+def _action_label(action: str) -> str:
+    return ACTION_LABELS.get(action, action)
 
 
-def _next_stage(stage: str) -> str:
-    idx = STAGE_INDEX.get(stage, 0)
-    if idx >= len(STAGES) - 1:
-        return stage
-    return STAGES[idx + 1][0]
-
-
-def _stage_log(stage: str, message: str) -> None:
+def _action_log(action: str, message: str) -> None:
     engine: TaskEngine = st.session_state.engine
-    engine.log(f"[stage:{stage}] {message}")
+    engine.log(f"[action:{action}] {message}")
 
 
-def _set_stage_status(stage: str, status: str) -> None:
-    st.session_state.stage_status_map[stage] = status
+def _logs_by_action(action: str, limit: int = 200) -> list[str]:
+    logs = st.session_state.engine.logs
+    if action == "all":
+        return logs[-limit:] if limit > 0 else logs
+    token = f"[action:{action}]"
+    rows = [line for line in logs if token in line]
+    if limit <= 0:
+        return rows
+    return rows[-limit:]
 
 
-def _set_stage(stage: str) -> None:
-    st.session_state.current_stage = stage
+def _append_action_error(action: str, message: str) -> None:
+    bucket = st.session_state.action_errors
+    if action not in bucket:
+        bucket[action] = []
+    bucket[action].append(message)
 
 
-def _append_stage_error(stage: str, message: str) -> None:
-    bucket = st.session_state.step_errors
-    if stage not in bucket:
-        bucket[stage] = []
-    bucket[stage].append(message)
-
-
-def _clear_stage_error(stage: str) -> None:
-    st.session_state.step_errors[stage] = []
+def _clear_action_error(action: str) -> None:
+    st.session_state.action_errors[action] = []
 
 
 def _append_artifact(path: Path, kind: str, uid: str = "") -> None:
@@ -329,79 +317,77 @@ def _append_artifact(path: Path, kind: str, uid: str = "") -> None:
 
 
 def _paper_title(uid: str) -> str:
-    for row in st.session_state.filtered_candidates:
+    for row in st.session_state.recommend_rows:
         if row.get("uid") == uid:
             return row.get("title") or uid
+    path = Path(str(uid))
+    if path.suffix.lower() == ".pdf":
+        return path.stem
     return uid
 
 
-def _refresh_selected_uids() -> None:
+def _refresh_recommend_selected() -> None:
+    rows = st.session_state.recommend_rows
     selected = []
-    for row in st.session_state.filtered_candidates:
+    for row in rows:
         uid = row["uid"]
-        if st.session_state.get(f"pick_{uid}", False):
+        if st.session_state.get(f"rec_pick_{uid}", False):
             selected.append(uid)
-    st.session_state.selected_uids = selected
+    st.session_state.recommend_selected_uids = selected
 
 
-def _set_selected_uids(uids: list[str], sync_pick_keys: bool = True) -> None:
-    st.session_state.selected_uids = list(uids)
+def _set_recommend_selected_uids(uids: list[str], sync_pick_keys: bool = True) -> None:
+    rows = st.session_state.recommend_rows
+    st.session_state.recommend_selected_uids = list(uids)
     if not sync_pick_keys:
         return
     selected = set(uids)
-    for row in st.session_state.filtered_candidates:
+    for row in rows:
         uid = row["uid"]
-        st.session_state[f"pick_{uid}"] = uid in selected
+        st.session_state[f"rec_pick_{uid}"] = uid in selected
 
 
-def _queue_pick_sync(uids: list[str]) -> None:
-    st.session_state.pending_pick_uids = list(uids)
+def _queue_recommend_pick_sync(uids: list[str]) -> None:
+    st.session_state.pending_recommend_pick_uids = list(uids)
 
 
-def _apply_pending_pick_sync(rows: list[dict[str, Any]]) -> None:
-    pending = st.session_state.get("pending_pick_uids")
+def _apply_pending_recommend_pick_sync(rows: list[dict[str, Any]]) -> None:
+    pending = st.session_state.get("pending_recommend_pick_uids")
     if pending is None:
         return
     selected = set(pending)
     for row in rows:
         uid = row["uid"]
-        st.session_state[f"pick_{uid}"] = uid in selected
-    st.session_state.pending_pick_uids = None
+        st.session_state[f"rec_pick_{uid}"] = uid in selected
+    st.session_state.pending_recommend_pick_uids = None
 
 
-def _selected_candidates() -> list[PaperCandidate]:
-    selected = set(st.session_state.selected_uids)
+def _selected_recommend_candidates() -> list[PaperCandidate]:
+    selected = set(st.session_state.recommend_selected_uids)
     chosen: list[PaperCandidate] = []
-    for row in st.session_state.filtered_candidates:
+    for row in st.session_state.recommend_rows:
         if row["uid"] in selected:
             chosen.append(_candidate_from_row(row))
     return chosen
 
 
-def _run_stage(stage: str, task_name: str, fn) -> bool:
+def _run_action(action: str, task_name: str, fn) -> bool:
     engine: TaskEngine = st.session_state.engine
-    _clear_stage_error(stage)
-    _set_stage_status(stage, "running")
-    task_id = engine.queue(task_name, metadata={"stage": stage})
+    _clear_action_error(action)
+    task_id = engine.queue(task_name, metadata={"action": action})
     engine.start(task_id)
-    _stage_log(stage, f"开始: {task_name}")
+    _action_log(action, f"开始: {task_name}")
     try:
         fn(engine)
     except Exception as exc:
         detail = str(exc)
-        if stage == "lock" and "cannot be modified after the widget with key" in detail:
-            detail = f"{detail}（检测到状态冲突；已启用延迟同步策略，请重试当前操作）"
         engine.fail(task_id, detail)
-        _set_stage_status(stage, "failed")
-        _append_stage_error(stage, detail)
-        _stage_log(stage, f"失败: {detail}")
-        st.error(f"{_stage_label(stage)}失败：{detail}")
+        _append_action_error(action, detail)
+        _action_log(action, f"失败: {detail}")
+        st.error(f"{_action_label(action)}失败：{detail}")
         return False
     engine.success(task_id)
-    _set_stage_status(stage, "success")
-    _stage_log(stage, "完成")
-    if stage != "validate":
-        _set_stage(_next_stage(stage))
+    _action_log(action, "完成")
     return True
 
 
@@ -429,52 +415,65 @@ def _recommend(config: dict[str, Any]) -> bool:
             raw = _run("builtin")
         filtered = filter_candidates(raw, config["year_range"][0], config["year_range"][1])
         st.session_state.candidates = [x.to_dict() for x in raw]
-        st.session_state.filtered_candidates = [x.to_dict() for x in filtered]
-        st.session_state.selected_uids = []
+        st.session_state.recommend_rows = [x.to_dict() for x in filtered]
+        st.session_state.recommend_selected_uids = []
+        st.session_state.download_queue_uids = []
         st.session_state.resolved_urls = {}
-        st.session_state.downloaded = {}
-        st.session_state.artifacts = []
-        st.session_state.pending_pick_uids = None
-        for row in st.session_state.filtered_candidates:
-            st.session_state[f"pick_{row['uid']}"] = False
-        _stage_log("recommend", f"候选: raw={len(raw)} filtered={len(filtered)}")
+        st.session_state.pending_recommend_pick_uids = None
+        for row in st.session_state.recommend_rows:
+            st.session_state[f"rec_pick_{row['uid']}"] = False
+        _action_log("recommend", f"候选: raw={len(raw)} filtered={len(filtered)}")
         if not filtered:
             raise RuntimeError("推荐为空，请调整主题或年份范围")
 
-    return _run_stage("recommend", "获取推荐", _impl)
+    return _run_action("recommend", "获取推荐", _impl)
 
 
-def _lock_top_k(config: dict[str, Any]) -> bool:
-    def _impl(engine: TaskEngine) -> None:
-        _refresh_selected_uids()
-        selected = list(st.session_state.selected_uids)
-        if not selected:
-            fallback = select_top_k(
-                [_candidate_from_row(row) for row in st.session_state.filtered_candidates],
-                int(config["top_k"]),
-            )
-            selected = [x.uid for x in fallback]
-        if not selected:
-            raise RuntimeError("没有可锁定的论文")
-        selected_set = set(selected)
-        ordered = [row["uid"] for row in st.session_state.filtered_candidates if row["uid"] in selected_set]
-        ordered = ordered[: int(config["top_k"])]
-        _set_selected_uids(ordered, sync_pick_keys=False)
-        _queue_pick_sync(ordered)
-        st.session_state.active_paper_uid = ordered[0]
-        _stage_log("lock", f"锁定论文数: {len(ordered)}")
+def _scan_kb_pdfs(output_dir: Path) -> list[dict[str, Any]]:
+    if not output_dir.exists():
+        return []
+    rows: list[dict[str, Any]] = []
+    for pdf in output_dir.rglob("*.pdf"):
+        try:
+            stat = pdf.stat()
+        except Exception:
+            continue
+        rows.append(
+            {
+                "uid": str(pdf.resolve()),
+                "name": pdf.name,
+                "path": str(pdf.resolve()),
+                "size_kb": round(stat.st_size / 1024.0, 1),
+                "mtime": stat.st_mtime,
+            }
+        )
+    rows.sort(key=lambda x: x["mtime"], reverse=True)
+    return rows
 
-    return _run_stage("lock", "锁定 Top-K", _impl)
+
+def _refresh_kb_files(config: dict[str, Any]) -> None:
+    kb_root = Path(config["output_dir"])
+    try:
+        kb_root.mkdir(parents=True, exist_ok=True)
+        st.session_state.kb_files = _scan_kb_pdfs(kb_root)
+    except Exception as exc:
+        st.session_state.kb_files = []
+        _append_action_error("system", f"知识库目录不可用: {exc}")
+        _action_log("system", f"知识库目录不可用: {exc}")
 
 
-def _download_one(uid: str, rank: int, config: dict[str, Any]) -> tuple[bool, str]:
-    target = None
-    for row in st.session_state.filtered_candidates:
-        if row["uid"] == uid:
-            target = _candidate_from_row(row)
-            break
-    if target is None:
+def _resolve_row_by_uid(uid: str) -> dict[str, Any] | None:
+    for row in st.session_state.recommend_rows:
+        if row.get("uid") == uid:
+            return row
+    return None
+
+
+def _download_recommend_one(uid: str, rank: int, config: dict[str, Any]) -> tuple[bool, str]:
+    row = _resolve_row_by_uid(uid)
+    if row is None:
         return False, "候选条目不存在"
+    target = _candidate_from_row(row)
 
     mapping = st.session_state.resolved_urls
     url = mapping.get(uid, "")
@@ -483,7 +482,7 @@ def _download_one(uid: str, rank: int, config: dict[str, Any]) -> tuple[bool, st
         if resolved:
             mapping[uid] = resolved
             url = resolved
-            _stage_log("download", f"解析URL成功: {target.title} <- {source}")
+            _action_log("download", f"解析URL成功: {target.title} <- {source}")
     if not url:
         return False, "未解析到可用 PDF"
 
@@ -491,50 +490,148 @@ def _download_one(uid: str, rank: int, config: dict[str, Any]) -> tuple[bool, st
     out_dir.mkdir(parents=True, exist_ok=True)
     pdf_path = out_dir / choose_filename(rank, target.title)
     download_pdf(url, pdf_path)
-    st.session_state.downloaded[uid] = str(pdf_path.resolve())
-    st.session_state.active_paper_uid = uid
+    st.session_state.downloaded[str(uid)] = str(pdf_path.resolve())
+    st.session_state.active_paper_uid = str(pdf_path.resolve())
     _append_artifact(pdf_path, "pdf", uid)
     return True, str(pdf_path)
 
 
-def _download(config: dict[str, Any]) -> bool:
+def _add_selection_to_download_queue(config: dict[str, Any]) -> bool:
+    rows = st.session_state.recommend_rows
+    _refresh_recommend_selected()
+    selected = list(st.session_state.recommend_selected_uids)
+    if not selected:
+        fallback = select_top_k([_candidate_from_row(row) for row in rows], int(config["top_k"]))
+        selected = [x.uid for x in fallback]
+    if not selected:
+        st.warning("没有可加入下载队列的候选")
+        return False
+    selected_set = set(selected)
+    ordered = [row["uid"] for row in rows if row["uid"] in selected_set]
+    ordered = ordered[: int(config["top_k"])]
+    st.session_state.download_queue_uids = ordered
+    _set_recommend_selected_uids(ordered, sync_pick_keys=False)
+    _queue_recommend_pick_sync(ordered)
+    _action_log("download", f"下载队列已更新: {len(ordered)} 项")
+    return True
+
+
+def _download_from_queue(config: dict[str, Any]) -> bool:
     def _impl(engine: TaskEngine) -> None:
-        chosen = select_top_k(_selected_candidates(), int(config["top_k"]))
+        queue = list(st.session_state.download_queue_uids)
+        if not queue:
+            raise RuntimeError("下载队列为空，请先在推荐工作台选择候选")
+        chosen = select_top_k(
+            [_candidate_from_row(_resolve_row_by_uid(uid)) for uid in queue if _resolve_row_by_uid(uid)],
+            int(config["top_k"]),
+        )
         if not chosen:
-            raise RuntimeError("请先在步骤2锁定论文")
+            raise RuntimeError("下载队列中没有可用候选")
         success = 0
         for idx, item in enumerate(chosen, start=1):
-            ok, detail = _download_one(item.uid, idx, config)
+            ok, detail = _download_recommend_one(item.uid, idx, config)
             if ok:
                 success += 1
-                _stage_log("download", f"下载成功: {item.title}")
+                _action_log("download", f"下载成功: {item.title}")
             else:
-                _append_stage_error("download", f"{item.title}: {detail}")
-                _stage_log("download", f"下载失败: {item.title} | {detail}")
+                _append_action_error("download", f"{item.title}: {detail}")
+                _action_log("download", f"下载失败: {item.title} | {detail}")
         write_today_recommendations(Path(config["output_dir"]), chosen, st.session_state.resolved_urls)
         _append_artifact(Path(config["output_dir"]) / "today_recommendations.md", "recommendation")
         _append_artifact(Path(config["output_dir"]) / "today_recommendations.json", "recommendation")
+        _refresh_kb_files(config)
         if success == 0:
             raise RuntimeError("没有任何论文下载成功")
 
-    return _run_stage("download", "下载 PDF", _impl)
+    return _run_action("download", "下载推荐 PDF", _impl)
 
 
-def _read_one(uid: str, config: dict[str, Any]) -> tuple[bool, str]:
-    pdf_raw = st.session_state.downloaded.get(uid, "")
-    if not pdf_raw:
-        return False, "找不到已下载 PDF 路径"
+def _filename_from_url(url: str, idx: int) -> str:
+    clean = str(url or "").strip().split("?")[0].split("#")[0]
+    name = Path(clean).name or f"manual_{idx:02d}.pdf"
+    safe = "".join(ch if ch.isalnum() or ch in {"-", "_", "."} else "_" for ch in name)
+    if not safe.lower().endswith(".pdf"):
+        safe += ".pdf"
+    return safe
+
+
+def _download_manual_urls(config: dict[str, Any]) -> bool:
+    def _impl(engine: TaskEngine) -> None:
+        lines = [line.strip() for line in str(st.session_state.kb_manual_urls or "").splitlines() if line.strip()]
+        if not lines:
+            raise RuntimeError("请至少输入一个 PDF URL")
+        out_dir = Path(config["output_dir"])
+        out_dir.mkdir(parents=True, exist_ok=True)
+        success = 0
+        for idx, url in enumerate(lines, start=1):
+            try:
+                path = out_dir / _filename_from_url(url, idx)
+                download_pdf(url, path)
+                success += 1
+                st.session_state.downloaded[str(path.resolve())] = str(path.resolve())
+                st.session_state.active_paper_uid = str(path.resolve())
+                _append_artifact(path, "pdf", str(path.resolve()))
+                _action_log("download", f"手动URL下载成功: {path.name}")
+            except Exception as exc:
+                detail = str(exc)
+                _append_action_error("download", f"{url}: {detail}")
+                _action_log("download", f"手动URL下载失败: {url} | {detail}")
+        _refresh_kb_files(config)
+        if success == 0:
+            raise RuntimeError("手动 URL 下载全部失败")
+
+    return _run_action("download", "手动 URL 下载", _impl)
+
+
+def _upload_local_pdfs(files: list[Any], config: dict[str, Any]) -> bool:
+    def _impl(engine: TaskEngine) -> None:
+        if not files:
+            raise RuntimeError("请先选择要上传的 PDF 文件")
+        out_dir = Path(config["output_dir"])
+        out_dir.mkdir(parents=True, exist_ok=True)
+        success = 0
+        for idx, item in enumerate(files, start=1):
+            try:
+                raw_name = Path(str(getattr(item, "name", f"upload_{idx}.pdf"))).name
+                if not raw_name.lower().endswith(".pdf"):
+                    continue
+                target = out_dir / raw_name
+                suffix = 1
+                while target.exists():
+                    target = out_dir / f"{Path(raw_name).stem}_{suffix}.pdf"
+                    suffix += 1
+                target.write_bytes(item.getvalue())
+                st.session_state.downloaded[str(target.resolve())] = str(target.resolve())
+                st.session_state.active_paper_uid = str(target.resolve())
+                _append_artifact(target, "pdf", str(target.resolve()))
+                _action_log("upload", f"上传成功: {target.name}")
+                success += 1
+            except Exception as exc:
+                detail = str(exc)
+                _append_action_error("upload", f"{getattr(item, 'name', 'unknown')}: {detail}")
+                _action_log("upload", f"上传失败: {getattr(item, 'name', 'unknown')} | {detail}")
+        _refresh_kb_files(config)
+        if success == 0:
+            raise RuntimeError("本地上传全部失败")
+
+    return _run_action("upload", "本地上传入库", _impl)
+
+
+def _read_one_pdf(pdf_path: Path, config: dict[str, Any]) -> tuple[bool, str, bool]:
+    if not pdf_path.exists():
+        return False, "目标 PDF 不存在", False
     base_url = (config["llm_base_url"] or "").strip()
     api_key = (config["llm_api_key"] or "").strip()
     model = (config["llm_model"] or "").strip()
     if not base_url or not api_key or not model:
-        return False, "LLM 配置不完整"
-    pdf_path = Path(pdf_raw)
+        return False, "LLM 配置不完整", False
+
     def _run(mode: str) -> Path:
         service = ReadingService(Path(config["paper_skill_dir"]), mode=mode)
         full_text = service.extract_text(pdf_path)
         fulltext_path = pdf_path.with_name(f"{pdf_path.stem}_fulltext.txt")
         fulltext_path.write_text(full_text, encoding="utf-8")
+        uid = str(pdf_path.resolve())
         _append_artifact(fulltext_path, "fulltext", uid)
         md_path = service.generate_report_md(
             paper_pdf=pdf_path,
@@ -547,186 +644,74 @@ def _read_one(uid: str, config: dict[str, Any]) -> tuple[bool, str]:
         _append_artifact(md_path, "report_md", uid)
         html_path = service.render_html(pdf_path)
         _append_artifact(html_path, "report_html", uid)
+        validation_path = service.validate(pdf_path)
+        _append_artifact(validation_path, "validation", uid)
+        payload = json.loads(validation_path.read_text(encoding="utf-8"))
+        if not payload.get("summary", {}).get("passed", False):
+            return validation_path
         return md_path
 
     mode = _normalize_integration_mode(config.get("integration_mode", "builtin"))
     try:
-        md_path = _run(mode)
+        result_path = _run(mode)
     except ExternalDependencyUnavailable as exc:
         if mode != "external":
             raise
         _fallback_to_builtin(config, reason=str(exc))
-        md_path = _run("builtin")
-
+        result_path = _run("builtin")
+    uid = str(pdf_path.resolve())
+    st.session_state.downloaded[uid] = uid
     st.session_state.active_paper_uid = uid
-    return True, str(md_path)
+    if result_path.suffix.lower() == ".json":
+        return False, "hard checks 未通过", True
+    return True, str(result_path), True
 
 
-def _read(config: dict[str, Any]) -> bool:
+def _read_selected_pdfs(config: dict[str, Any]) -> bool:
     def _impl(engine: TaskEngine) -> None:
-        if not st.session_state.downloaded:
-            raise RuntimeError("请先完成下载")
+        targets = [Path(p) for p in st.session_state.reading_targets if Path(p).exists()]
+        if not targets:
+            raise RuntimeError("请先在研读工作台选择至少一篇知识库 PDF")
         success = 0
-        for uid in list(st.session_state.downloaded.keys()):
-            title = _paper_title(uid)
+        validate_failed = 0
+        for pdf_path in targets:
+            uid = str(pdf_path.resolve())
+            title = pdf_path.stem
             try:
-                ok, detail = _read_one(uid, config)
+                ok, detail, validated = _read_one_pdf(pdf_path, config)
             except Exception as exc:
-                ok, detail = False, str(exc)
+                ok, detail, validated = False, str(exc), False
             if ok:
                 success += 1
-                _stage_log("read", f"生成成功: {title}")
+                _action_log("read", f"生成成功: {title}")
+                _action_log("validate", f"校验通过: {title}")
             else:
-                _append_stage_error("read", f"{title}: {detail}")
-                _stage_log("read", f"生成失败: {title} | {detail}")
+                if validated:
+                    validate_failed += 1
+                    _append_action_error("validate", f"{title}: {detail}")
+                    _action_log("validate", f"校验失败: {title} | {detail}")
+                else:
+                    _append_action_error("read", f"{title}: {detail}")
+                    _action_log("read", f"生成失败: {title} | {detail}")
+        if validate_failed > 0:
+            raise RuntimeError(f"{validate_failed} 篇论文校验未通过")
         if success == 0:
             raise RuntimeError("报告生成全部失败")
 
-    return _run_stage("read", "生成报告", _impl)
-
-
-def _validate_one(uid: str, config: dict[str, Any]) -> tuple[bool, str]:
-    pdf_raw = st.session_state.downloaded.get(uid, "")
-    if not pdf_raw:
-        return False, "缺少 PDF 路径"
-    pdf_path = Path(pdf_raw)
-    mode = _normalize_integration_mode(config.get("integration_mode", "builtin"))
-
-    def _run(run_mode: str) -> Path:
-        service = ReadingService(Path(config["paper_skill_dir"]), mode=run_mode)
-        return service.validate(pdf_path)
-
-    try:
-        validation_path = _run(mode)
-    except ExternalDependencyUnavailable as exc:
-        if mode != "external":
-            raise
-        _fallback_to_builtin(config, reason=str(exc))
-        validation_path = _run("builtin")
-
-    _append_artifact(validation_path, "validation", uid)
-    payload = json.loads(validation_path.read_text(encoding="utf-8"))
-    if not payload.get("summary", {}).get("passed", False):
-        return False, "hard checks 未通过"
-    return True, str(validation_path)
-
-
-def _validate(config: dict[str, Any]) -> bool:
-    def _impl(engine: TaskEngine) -> None:
-        if not st.session_state.downloaded:
-            raise RuntimeError("请先完成前置步骤")
-        failed = 0
-        for uid in list(st.session_state.downloaded.keys()):
-            title = _paper_title(uid)
-            try:
-                ok, detail = _validate_one(uid, config)
-            except Exception as exc:
-                ok, detail = False, str(exc)
-            if ok:
-                _stage_log("validate", f"校验通过: {title}")
-            else:
-                failed += 1
-                _append_stage_error("validate", f"{title}: {detail}")
-                _stage_log("validate", f"校验失败: {title} | {detail}")
-        if failed:
-            raise RuntimeError(f"{failed} 篇论文校验未通过")
-
-    return _run_stage("validate", "执行校验", _impl)
-
-
-def _report_uid_set() -> set[str]:
-    seen: set[str] = set()
-    for item in st.session_state.artifacts:
-        if item.get("kind") == "report_md" and item.get("uid"):
-            seen.add(item["uid"])
-    return seen
-
-
-def _validation_pass_uid_set() -> set[str]:
-    passed: set[str] = set()
-    for item in st.session_state.artifacts:
-        if item.get("kind") != "validation" or not item.get("uid"):
-            continue
-        try:
-            payload = json.loads(Path(item["path"]).read_text(encoding="utf-8"))
-            if payload.get("summary", {}).get("passed", False):
-                passed.add(item["uid"])
-        except Exception:
-            continue
-    return passed
-
-
-def _render_retry_download(config: dict[str, Any]) -> None:
-    failed = [uid for uid in st.session_state.selected_uids if uid not in st.session_state.downloaded]
-    if not failed:
-        return
-    st.markdown("##### 条目重试")
-    for uid in failed:
-        title = _paper_title(uid)
-        if st.button(f"重试下载：{title[:34]}", key=f"retry_download_{uid}", use_container_width=True):
-            rank = max(1, st.session_state.selected_uids.index(uid) + 1)
-            ok, detail = _download_one(uid, rank, config)
-            if ok:
-                st.success(f"已重试成功：{title}")
-            else:
-                st.error(f"重试失败：{title} | {detail}")
-
-
-def _render_retry_read(config: dict[str, Any]) -> None:
-    ready = set(st.session_state.downloaded.keys())
-    finished = _report_uid_set()
-    failed = [uid for uid in ready if uid not in finished]
-    if not failed:
-        return
-    st.markdown("##### 条目重试")
-    for uid in failed:
-        title = _paper_title(uid)
-        if st.button(f"重试研读：{title[:34]}", key=f"retry_read_{uid}", use_container_width=True):
-            try:
-                ok, detail = _read_one(uid, config)
-            except Exception as exc:
-                ok, detail = False, str(exc)
-            if ok:
-                st.success(f"已重试成功：{title}")
-            else:
-                st.error(f"重试失败：{title} | {detail}")
-
-
-def _render_retry_validate(config: dict[str, Any]) -> None:
-    ready = set(st.session_state.downloaded.keys())
-    passed = _validation_pass_uid_set()
-    failed = [uid for uid in ready if uid not in passed]
-    if not failed:
-        return
-    st.markdown("##### 条目重试")
-    for uid in failed:
-        title = _paper_title(uid)
-        if st.button(f"重试校验：{title[:34]}", key=f"retry_validate_{uid}", use_container_width=True):
-            try:
-                ok, detail = _validate_one(uid, config)
-            except Exception as exc:
-                ok, detail = False, str(exc)
-            if ok:
-                st.success(f"已重试成功：{title}")
-            else:
-                st.error(f"重试失败：{title} | {detail}")
+    return _run_action("read", "研读并自动校验", _impl)
 
 
 def _run_auto(config: dict[str, Any]) -> None:
-    _set_stage("recommend")
-    if not _recommend(config):
+    ok = _recommend(config)
+    if not ok:
         return
-    _set_stage("lock")
-    if not _lock_top_k(config):
+    _add_selection_to_download_queue(config)
+    ok = _download_from_queue(config)
+    if not ok:
         return
-    _set_stage("download")
-    if not _download(config):
-        return
-    _set_stage("read")
-    if not _read(config):
-        return
-    _set_stage("validate")
-    _validate(config)
+    _refresh_kb_files(config)
+    st.session_state.reading_targets = [item["path"] for item in st.session_state.kb_files[: int(config["top_k"])]]
+    _read_selected_pdfs(config)
 
 
 @st.dialog("高级设置", width="large")
@@ -862,8 +847,8 @@ def _render_config_drawer() -> dict[str, Any]:
             else:
                 st.error(status_text)
 
-        st.caption("一键流水线作为次级入口保留。")
-        if st.button("运行一键自动流水线", use_container_width=True):
+        st.caption("一键自动流水线作为次级入口保留。")
+        if st.button("运行一键自动流水线（可选）", use_container_width=True):
             _run_auto(_config_snapshot())
     else:
         st.markdown(
@@ -906,12 +891,12 @@ def _config_snapshot() -> dict[str, Any]:
 
 
 def _render_topbar(config: dict[str, Any]) -> None:
-    current = st.session_state.current_stage
     chips = [
-        "<span class='chip'>Research Console V2</span>",
+        "<span class='chip'>Research Console V3</span>",
         f"<span class='chip'>日期：{date.today()}</span>",
-        f"<span class='chip'>当前阶段：{_stage_label(current)}</span>",
+        "<span class='chip'>交互：工作台模式</span>",
         f"<span class='chip'>模式：{config['integration_mode']}</span>",
+        f"<span class='chip'>KB：{len(st.session_state.kb_files)} 篇 PDF</span>",
         f"<span class='chip'>AMiner Key：{'已配置' if config['aminer_api_key'] else '未配置'}</span>",
         f"<span class='chip'>LLM Key：{'已配置' if config['llm_api_key'] else '未配置'}</span>",
         f"<span class='chip'>模型：{config['llm_model'] or 'N/A'}</span>",
@@ -922,95 +907,168 @@ def _render_topbar(config: dict[str, Any]) -> None:
         st.info(notice)
 
 
-def _render_stepper() -> None:
-    current = st.session_state.current_stage
-    status_map = st.session_state.stage_status_map
-    html = ["<div class='stepper'>"]
-    for idx, (key, label) in enumerate(STAGES, start=1):
-        status = status_map.get(key, "pending")
-        cls = "step"
-        if key == current:
-            cls += " current"
-        if status == "success":
-            cls += " success"
-        if status == "failed":
-            cls += " failed"
-        state_text = {"pending": "待执行", "running": "执行中", "success": "完成", "failed": "失败"}.get(status, status)
-        html.append(f"<div class='{cls}'><div class='idx'>STEP {idx}</div><div class='label'>{label}</div><div class='state'>{state_text}</div></div>")
-    html.append("</div>")
-    st.markdown("".join(html), unsafe_allow_html=True)
-
-
-def _render_stage(config: dict[str, Any]) -> None:
+def _render_recommend_workbench(config: dict[str, Any]) -> None:
     st.markdown("<div class='panel'>", unsafe_allow_html=True)
-    st.markdown("<h3 class='title'>流程主舞台</h3>", unsafe_allow_html=True)
-    st.markdown("<div class='muted'>默认分步可控：每个阶段仅保留一个主操作按钮。</div>", unsafe_allow_html=True)
-    _render_stepper()
-    stage = st.session_state.current_stage
-    if stage == "recommend":
-        st.subheader("步骤1：获取推荐")
+    st.markdown(
+        "<div class='workbench-head'><h3 class='title'>推荐工作台</h3><span class='section-tag'>随时获取候选并加入下载队列</span></div>",
+        unsafe_allow_html=True,
+    )
+    c1, c2 = st.columns([2, 1])
+    with c1:
         if st.button("获取推荐", type="primary", use_container_width=True):
             _recommend(config)
-        rows = st.session_state.filtered_candidates
-        if rows:
-            preview = [{"标题": r["title"], "年份": r.get("year") or "N/A"} for r in rows[:12]]
-            st.dataframe(preview, use_container_width=True, hide_index=True)
-    elif stage == "lock":
-        st.subheader("步骤2：锁定 Top-K")
-        rows = st.session_state.filtered_candidates
-        if not rows:
-            st.warning("请先执行步骤1")
-        else:
-            _apply_pending_pick_sync(rows)
-            a, b, c = st.columns(3)
-            if a.button("全选", use_container_width=True):
-                _set_selected_uids([row["uid"] for row in rows])
-            if b.button("清空", use_container_width=True):
-                _set_selected_uids([])
-            if c.button("仅近两年", use_container_width=True):
-                threshold = date.today().year - 1
-                _set_selected_uids([row["uid"] for row in rows if int(row.get("year") or 0) >= threshold])
-            st.markdown("---")
-            for row in rows:
-                uid = row["uid"]
-                st.checkbox(f"{row['title']} ({row.get('year') or 'N/A'})", value=uid in st.session_state.selected_uids, key=f"pick_{uid}")
-            _refresh_selected_uids()
-            if st.button("锁定 Top-K 并进入下载", type="primary", use_container_width=True):
-                _lock_top_k(config)
-    elif stage == "download":
-        st.subheader("步骤3：下载 PDF")
-        selected = select_top_k(_selected_candidates(), int(config["top_k"]))
-        if not selected:
-            st.warning("请先执行步骤2")
-        else:
-            for i, item in enumerate(selected, start=1):
-                status = "已下载" if st.session_state.downloaded.get(item.uid) else "待下载"
-                st.markdown(f"{i}. **{item.title}** · `{status}`")
-            if st.button("下载 PDF", type="primary", use_container_width=True):
-                _download(config)
-            _render_retry_download(config)
-    elif stage == "read":
-        st.subheader("步骤4：生成报告")
-        if not st.session_state.downloaded:
-            st.warning("请先执行步骤3")
-        else:
-            for uid, path in st.session_state.downloaded.items():
-                st.markdown(f"- **{_paper_title(uid)}**")
-                st.caption(_truncate_middle(path, 84))
-            if st.button("开始研读并生成报告", type="primary", use_container_width=True):
-                _read(config)
-            _render_retry_read(config)
+    with c2:
+        if st.button("清空推荐结果", use_container_width=True):
+            st.session_state.recommend_rows = []
+            st.session_state.recommend_selected_uids = []
+            st.session_state.download_queue_uids = []
+
+    rows = st.session_state.recommend_rows
+    if not rows:
+        st.info("暂无推荐结果。你可以随时点击“获取推荐”。")
+        st.markdown("</div>", unsafe_allow_html=True)
+        return
+
+    _apply_pending_recommend_pick_sync(rows)
+    b1, b2, b3 = st.columns(3)
+    if b1.button("全选候选", use_container_width=True):
+        _set_recommend_selected_uids([row["uid"] for row in rows])
+    if b2.button("清空选择", use_container_width=True):
+        _set_recommend_selected_uids([])
+    if b3.button("仅近两年", use_container_width=True):
+        threshold = date.today().year - 1
+        _set_recommend_selected_uids([row["uid"] for row in rows if int(row.get("year") or 0) >= threshold])
+
+    st.markdown("---")
+    for row in rows:
+        uid = row["uid"]
+        title = row.get("title") or uid
+        year_text = row.get("year") or "N/A"
+        st.checkbox(f"{title} ({year_text})", value=uid in st.session_state.recommend_selected_uids, key=f"rec_pick_{uid}")
+    _refresh_recommend_selected()
+
+    q1, q2 = st.columns([2, 1])
+    with q1:
+        if st.button("加入下载队列（按 Top-K 截断）", use_container_width=True):
+            if _add_selection_to_download_queue(config):
+                st.success(f"下载队列已更新：{len(st.session_state.download_queue_uids)} 项")
+    with q2:
+        st.markdown(f"<div class='muted'>当前队列：{len(st.session_state.download_queue_uids)} 项</div>", unsafe_allow_html=True)
+
+    preview = [{"标题": r["title"], "年份": r.get("year") or "N/A"} for r in rows[:20]]
+    st.dataframe(preview, use_container_width=True, hide_index=True)
+    st.markdown("</div>", unsafe_allow_html=True)
+
+
+def _render_kb_workbench(config: dict[str, Any]) -> None:
+    st.markdown("<div class='panel'>", unsafe_allow_html=True)
+    st.markdown(
+        "<div class='workbench-head'><h3 class='title'>知识库工作台</h3><span class='section-tag'>推荐下载 + 手动 URL + 本地上传</span></div>",
+        unsafe_allow_html=True,
+    )
+    if st.button("刷新知识库索引", use_container_width=True):
+        _refresh_kb_files(config)
+
+    queue = list(st.session_state.download_queue_uids)
+    if queue:
+        st.markdown("##### 推荐队列下载")
+        st.caption(f"待下载 {len(queue)} 项（来源：推荐工作台）")
+        if st.button("下载队列论文到知识库", type="primary", use_container_width=True):
+            _download_from_queue(config)
     else:
-        st.subheader("步骤5：校验完成")
-        if not st.session_state.downloaded:
-            st.warning("请先执行前置步骤")
-        else:
-            if st.button("执行质量校验并完成", type="primary", use_container_width=True):
-                _validate(config)
-            _render_retry_validate(config)
-            rows = st.session_state.engine.as_table_rows()
-            if rows:
-                st.dataframe(rows, use_container_width=True, hide_index=True)
+        st.info("推荐下载队列为空，可先在“推荐工作台”勾选候选并加入队列。")
+
+    st.markdown("---")
+    st.markdown("##### 手动 URL 入库")
+    st.session_state.kb_manual_urls = st.text_area(
+        "每行一个 PDF URL",
+        value=st.session_state.kb_manual_urls,
+        height=96,
+        placeholder="https://arxiv.org/pdf/xxxx.xxxxx.pdf",
+    )
+    if st.button("下载手动 URL 到知识库", use_container_width=True):
+        _download_manual_urls(config)
+
+    st.markdown("---")
+    st.markdown("##### 本地 PDF 上传")
+    uploaded = st.file_uploader(
+        "选择本地 PDF 文件（可多选）",
+        type=["pdf"],
+        accept_multiple_files=True,
+        key="kb_upload_files",
+    )
+    if st.button("上传文件到知识库", use_container_width=True):
+        _upload_local_pdfs(uploaded or [], config)
+
+    st.markdown("---")
+    st.markdown("##### 当前知识库 PDF")
+    kb_rows = st.session_state.kb_files
+    if not kb_rows:
+        st.info("知识库为空，请先下载或上传 PDF。")
+    else:
+        view = [
+            {
+                "文件名": row["name"],
+                "大小(KB)": row["size_kb"],
+                "更新时间(时间戳)": int(row["mtime"]),
+            }
+            for row in kb_rows[:200]
+        ]
+        st.dataframe(view, use_container_width=True, hide_index=True)
+    st.markdown("</div>", unsafe_allow_html=True)
+
+
+def _render_read_workbench(config: dict[str, Any]) -> None:
+    st.markdown("<div class='panel'>", unsafe_allow_html=True)
+    st.markdown(
+        "<div class='workbench-head'><h3 class='title'>研读工作台</h3><span class='section-tag'>从知识库选择并自动校验</span></div>",
+        unsafe_allow_html=True,
+    )
+    kb_rows = st.session_state.kb_files
+    if not kb_rows:
+        st.info("知识库暂无 PDF，请先在“知识库工作台”入库。")
+        st.markdown("</div>", unsafe_allow_html=True)
+        return
+
+    options: list[str] = []
+    label_to_path: dict[str, str] = {}
+    for row in kb_rows:
+        path = row["path"]
+        label = f"{row['name']} ({row['size_kb']} KB)"
+        options.append(label)
+        label_to_path[label] = path
+
+    current_selected = set(st.session_state.reading_targets)
+    default_labels = [label for label in options if label_to_path[label] in current_selected]
+    chosen_labels = st.multiselect(
+        "选择要研读的论文 PDF（可多选）",
+        options=options,
+        default=default_labels,
+    )
+    st.session_state.reading_targets = [label_to_path[label] for label in chosen_labels]
+
+    r1, r2 = st.columns([2, 1])
+    with r1:
+        if st.button("开始研读并自动校验", type="primary", use_container_width=True):
+            _read_selected_pdfs(config)
+    with r2:
+        if st.button("选择最新 Top-K", use_container_width=True):
+            latest = [row["path"] for row in kb_rows[: int(config["top_k"])]]
+            st.session_state.reading_targets = latest
+            st.rerun()
+
+    if st.session_state.reading_targets:
+        st.markdown("##### 当前研读目标")
+        for path in st.session_state.reading_targets:
+            st.markdown(f"- `{_truncate_middle(path, 100)}`")
+    st.markdown("</div>", unsafe_allow_html=True)
+
+
+def _render_workbench(config: dict[str, Any]) -> None:
+    st.markdown("<div class='workbench-grid'>", unsafe_allow_html=True)
+    _render_recommend_workbench(config)
+    _render_kb_workbench(config)
+    _render_read_workbench(config)
     st.markdown("</div>", unsafe_allow_html=True)
 
 
@@ -1022,19 +1080,21 @@ def _render_context(config: dict[str, Any]) -> None:
 
     options = ["(自动)"]
     uid_map = {"(自动)": ""}
-    for uid in st.session_state.downloaded.keys():
-        label = f"{_truncate_middle(_paper_title(uid), 22)} [{uid}]"
+    for row in st.session_state.kb_files:
+        uid = row["path"]
+        label = f"{_truncate_middle(Path(uid).stem, 22)} [{_truncate_middle(uid, 18)}]"
         options.append(label)
         uid_map[label] = uid
-    selected_label = st.selectbox("当前论文上下文", options=options)
+    selected_label = st.selectbox("当前论文上下文", options=options, key="ctx_uid_select")
     selected_uid = uid_map[selected_label]
     if selected_uid:
         st.session_state.active_paper_uid = selected_uid
 
-    stage = st.session_state.current_stage
-    logs = st.session_state.engine.logs_by_stage(stage, limit=220) or st.session_state.engine.logs[-120:]
+    action_options = ["all", "recommend", "download", "upload", "read", "validate", "system"]
+    action = st.selectbox("操作日志过滤", options=action_options, format_func=lambda x: "全部" if x == "all" else _action_label(x))
+    logs = _logs_by_action(action, limit=220) or st.session_state.engine.logs[-120:]
     safe = "\n".join(logs).replace("<", "&lt;").replace(">", "&gt;")
-    st.markdown("<div class='muted' style='margin-top:8px'>当前步骤日志</div>", unsafe_allow_html=True)
+    st.markdown("<div class='muted' style='margin-top:8px'>操作日志</div>", unsafe_allow_html=True)
     st.markdown(f"<div class='log'>{safe.replace(chr(10), '<br/>')}</div>", unsafe_allow_html=True)
 
     st.markdown("<div class='muted' style='margin-top:10px'>产物索引</div>", unsafe_allow_html=True)
@@ -1059,41 +1119,50 @@ def _render_context(config: dict[str, Any]) -> None:
         selected_idx = options.index(selected)
         st.code(visible_artifacts[selected_idx]["path"], language=None)
 
-    errors = st.session_state.step_errors.get(stage, [])
+    errors: list[str] = []
+    if action == "all":
+        for key in ["recommend", "download", "upload", "read", "validate"]:
+            errors.extend(st.session_state.action_errors.get(key, []))
+    else:
+        errors = st.session_state.action_errors.get(action, [])
     st.markdown("<div class='muted' style='margin-top:10px'>错误定位卡</div>", unsafe_allow_html=True)
     if errors:
         for err in errors[-8:]:
             st.error(err)
     else:
-        st.success("当前步骤无错误")
+        st.success("当前操作无错误")
     st.markdown("</div>", unsafe_allow_html=True)
 
 
 def _init_session() -> None:
     if "engine" not in st.session_state:
         st.session_state.engine = TaskEngine()
-    if "current_stage" not in st.session_state:
-        st.session_state.current_stage = "recommend"
-    if "stage_status_map" not in st.session_state:
-        st.session_state.stage_status_map = {key: "pending" for key, _ in STAGES}
     if "active_paper_uid" not in st.session_state:
         st.session_state.active_paper_uid = ""
-    if "step_errors" not in st.session_state:
-        st.session_state.step_errors = {key: [] for key, _ in STAGES}
+    if "action_errors" not in st.session_state:
+        st.session_state.action_errors = {key: [] for key in ACTION_LABELS}
     if "candidates" not in st.session_state:
         st.session_state.candidates = []
-    if "filtered_candidates" not in st.session_state:
-        st.session_state.filtered_candidates = []
-    if "selected_uids" not in st.session_state:
-        st.session_state.selected_uids = []
+    if "recommend_rows" not in st.session_state:
+        st.session_state.recommend_rows = []
+    if "recommend_selected_uids" not in st.session_state:
+        st.session_state.recommend_selected_uids = []
+    if "download_queue_uids" not in st.session_state:
+        st.session_state.download_queue_uids = []
+    if "kb_manual_urls" not in st.session_state:
+        st.session_state.kb_manual_urls = ""
+    if "kb_files" not in st.session_state:
+        st.session_state.kb_files = []
+    if "reading_targets" not in st.session_state:
+        st.session_state.reading_targets = []
     if "resolved_urls" not in st.session_state:
         st.session_state.resolved_urls = {}
     if "downloaded" not in st.session_state:
         st.session_state.downloaded = {}
     if "artifacts" not in st.session_state:
         st.session_state.artifacts = []
-    if "pending_pick_uids" not in st.session_state:
-        st.session_state.pending_pick_uids = None
+    if "pending_recommend_pick_uids" not in st.session_state:
+        st.session_state.pending_recommend_pick_uids = None
     if "integration_notice" not in st.session_state:
         st.session_state.integration_notice = ""
 
@@ -1103,9 +1172,10 @@ def main() -> None:
     left, center, right = st.columns([3, 6, 3], gap="medium")
     with left:
         config = _render_config_drawer()
+    _refresh_kb_files(config)
     _render_topbar(config)
     with center:
-        _render_stage(config)
+        _render_workbench(config)
     with right:
         _render_context(config)
 
